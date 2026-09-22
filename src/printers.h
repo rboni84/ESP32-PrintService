@@ -29,6 +29,8 @@ struct Printer {
     String name;          // prtGeneralPrinterName / instancia mDNS
     String model;         // TXT "ty" / sysDescr
     String location;      // TXT "note" / sysLocation
+    String pdl;           // linguagens aceitas, separadas por virgula: PDF,PS,PCL,PCLXL,PJL,URF,PWG,TEXT...
+                          // (TXT "pdl" do mDNS/IPP + prtInterpreterLangFamily via SNMP)
     bool manual = false;  // adicionada manualmente (persistida)
     bool viaMdns = false; // anunciada via mDNS
     uint8_t snmpVersion = 1;  // 1 = v2c, 0 = v1 (fallback apos timeouts)

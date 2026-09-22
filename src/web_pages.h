@@ -139,7 +139,7 @@ async function printers(){try{const r=await fetch('/api/printers');const j=await
 if(!j.printers.length){el.innerHTML='<div class="card"><h2>Impressoras</h2><p class="hint">'+(j.sta?'Nenhuma impressora encontrada. A descoberta mDNS roda a cada 2 minutos; você também pode adicionar por IP abaixo.':'Conecte o dispositivo a uma rede WiFi para iniciar o monitoramento.')+'</p></div>';return}
 el.innerHTML=j.printers.map(p=>{const cls=!p.online?'err':(p.alert?'warn':'ok');const title=esc(p.name||p.model||p.host||p.ip);
 const st=!p.online?'<span class="badge err">offline</span>':(p.alert?'<span class="badge warn">alerta</span>':'<span class="badge ok">ok</span>');
-let meta=[p.model&&p.model!==p.name?esc(p.model):'',esc(p.ip)+(p.host?' · '+esc(p.host):''),p.location?esc(p.location):'',p.manual?'cadastro manual':'descoberta mDNS'].filter(Boolean).join(' · ');
+let meta=[p.model&&p.model!==p.name?esc(p.model):'',esc(p.ip)+(p.host?' · '+esc(p.host):''),p.location?esc(p.location):'',p.manual?'cadastro manual':'descoberta mDNS',p.pdl&&p.pdl.length?'linguagens: '+esc(p.pdl.join(', ')):''].filter(Boolean).join(' · ');
 let body='';if(p.online){body+='<p class="meta">'+esc(p.dev_status_text)+' / '+esc(p.prn_status_text)+(p.pages!=null?' · '+p.pages.toLocaleString('pt-BR')+' páginas':'')+(p.last_ok!=null?' · há '+p.last_ok+' s':'')+'</p>';
 if(p.errors)body+='<p class="errs">⚠ '+esc(p.errors)+'</p>';if(p.supplies.length)body+='<div class="sup">'+p.supplies.map(supHtml).join('')+'</div>'}
 else body+='<p class="meta">Sem resposta SNMP'+(p.last_ok!=null?' (última há '+p.last_ok+' s)':'')+'</p>';

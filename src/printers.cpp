@@ -40,15 +40,77 @@ const char* OID_SUP_CLASS     = "1.3.6.1.2.1.43.11.1.1.4";
 const char* OID_SUP_TYPE      = "1.3.6.1.2.1.43.11.1.1.5";
 const char* OID_SUP_MAX       = "1.3.6.1.2.1.43.11.1.1.8";
 const char* OID_SUP_LEVEL     = "1.3.6.1.2.1.43.11.1.1.9";
+const char* OID_INTERP_LANG   = "1.3.6.1.2.1.43.15.1.1.2";  // prtInterpreterLangFamily.<dev>.<n>
 
 // ---------- estado da sondagem SNMP ----------
 Snmp::Client snmp;
-enum class PollStage { Idle, General, DeviceStatus, Supplies };
+enum class PollStage { Idle, General, DeviceStatus, Supplies, Interpreters };
 PollStage stage = PollStage::Idle;
 int8_t pollIdx = -1;          // impressora sendo sondada
-String walkOids[5];           // OIDs correntes da caminhada na tabela de suprimentos
+String walkOids[5];           // OIDs correntes da caminhada na tabela de suprimentos / interpretadores
 int hrIndex = 1;              // indice do dispositivo impressora em hrDeviceTable
+uint8_t interpCount = 0;      // linhas ja lidas de prtInterpreterTable
 Printer scratch;              // resultados parciais; copiados ao final (evita estado inconsistente)
+
+// ---------- linguagens (PDL) ----------
+
+void addToken(String& list, const String& tok) {
+    if (tok.isEmpty()) return;
+    String padded = "," + list + ",";
+    if (padded.indexOf("," + tok + ",") >= 0) return;
+    if (list.length()) list += ',';
+    list += tok;
+}
+
+void mergeTokens(String& list, const String& tokens) {
+    int start = 0;
+    while (start < (int)tokens.length()) {
+        int c = tokens.indexOf(',', start);
+        if (c < 0) c = tokens.length();
+        String t = tokens.substring(start, c); t.trim();
+        addToken(list, t);
+        start = c + 1;
+    }
+}
+
+// Printer-MIB PrtInterpreterLangFamilyTC (RFC 3805) -> token curto
+const char* langFamilyToken(int v) {
+    switch (v) {
+        case 3:  return "PCL";
+        case 4:  return "HPGL";
+        case 5:  return "PJL";
+        case 6:  return "PS";
+        case 9:  case 10: return "ESCP";
+        case 37: case 51: return "TEXT";
+        case 47: return "PCLXL";
+        case 54: return "PDF";
+        case 59: return "XPS";
+        default: return nullptr;
+    }
+}
+
+// Lista MIME do TXT "pdl" (IPP/Bonjour) -> tokens
+void addPdlFromMime(String& list, const String& mimes) {
+    int start = 0;
+    while (start < (int)mimes.length()) {
+        int c = mimes.indexOf(',', start);
+        if (c < 0) c = mimes.length();
+        String m = mimes.substring(start, c); m.trim(); m.toLowerCase();
+        start = c + 1;
+        const char* t = nullptr;
+        if      (m == "application/pdf")            t = "PDF";
+        else if (m == "application/postscript")     t = "PS";
+        else if (m == "application/vnd.hp-pcl")     t = "PCL";
+        else if (m == "application/vnd.hp-pclxl")   t = "PCLXL";
+        else if (m == "image/urf")                  t = "URF";
+        else if (m == "image/pwg-raster")           t = "PWG";
+        else if (m == "image/jpeg")                 t = "JPEG";
+        else if (m == "text/plain")                 t = "TEXT";
+        else if (m == "application/octet-stream")   t = "RAW";
+        else if (m == "application/vnd.ms-xpsdocument" || m == "application/oxps") t = "XPS";
+        if (t) addToken(list, t);
+    }
+}
 
 // ---------- estado da descoberta mDNS ----------
 struct ServiceType { const char* service; const char* proto; };
@@ -152,6 +214,8 @@ void handleDiscoveryResults(mdns_result_t* results) {
         else { String prod = txtValue(r, "product"); if (prod.length() && pr->model.isEmpty()) pr->model = prod; }
         String note = txtValue(r, "note");
         if (note.length()) pr->location = note;
+        String pdl = txtValue(r, "pdl");
+        if (pdl.length()) addPdlFromMime(pr->pdl, pdl);
         if (isNew) Serial.printf("[PRN] descoberta via mDNS: %s (%s) %s\n", ip.toString().c_str(),
                                  pr->host.c_str(), pr->model.c_str());
     }
@@ -231,6 +295,13 @@ void sendSuppliesNext(Printer& pr) {
     stage = PollStage::Supplies;
 }
 
+void startInterpreters(Printer& pr) {
+    walkOids[0] = OID_INTERP_LANG;
+    interpCount = 0;
+    snmp.request(pr.ip, SNMP_PORT, g_cfg->snmpCommunity, pr.snmpVersion, true, walkOids, 1, SNMP_TIMEOUT_MS);
+    stage = PollStage::Interpreters;
+}
+
 void finishPoll(bool ok) {
     if (pollIdx >= 0 && pollIdx < (int8_t)nPrinters) {
         Printer& pr = printers[pollIdx];
@@ -249,6 +320,7 @@ void finishPoll(bool ok) {
             pr.hasPageCount = scratch.hasPageCount;
             pr.supplyCount = scratch.supplyCount;
             for (uint8_t i = 0; i < scratch.supplyCount; i++) pr.supplies[i] = scratch.supplies[i];
+            mergeTokens(pr.pdl, scratch.pdl);   // uniao com o que veio do mDNS
             if (!pr.online) Serial.printf("[PRN] online: %s %s\n", pr.ip.toString().c_str(), pr.model.c_str());
             pr.online = true;
             pr.everOnline = true;
@@ -310,8 +382,8 @@ void handleSupplies(Printer& pr) {
     const Snmp::VarBind* t = vbUnder(2, OID_SUP_TYPE);
     const Snmp::VarBind* m = vbUnder(3, OID_SUP_MAX);
     const Snmp::VarBind* l = vbUnder(4, OID_SUP_LEVEL);
-    // fim da tabela (ou impressora sem Printer-MIB)
-    if (!l || !m || scratch.supplyCount >= MAX_SUPPLIES) { finishPoll(true); return; }
+    // fim da tabela (ou impressora sem Printer-MIB): segue para a tabela de interpretadores
+    if (!l || !m || scratch.supplyCount >= MAX_SUPPLIES) { startInterpreters(pr); return; }
     Supply& s = scratch.supplies[scratch.supplyCount++];
     s.desc = (d && d->type == Snmp::VarType::String) ? cleanStr(d->str) : String("Suprimento ") + scratch.supplyCount;
     s.cls = (c && c->isNumeric()) ? (uint8_t)c->num : 0;
@@ -321,6 +393,15 @@ void handleSupplies(Printer& pr) {
     // avanca a caminhada com os OIDs devolvidos
     for (uint8_t i = 0; i < 5; i++) walkOids[i] = snmp.results()[i].oid;
     sendSuppliesNext(pr);
+}
+
+void handleInterpreters(Printer& pr) {
+    const Snmp::VarBind* v = vbUnder(0, OID_INTERP_LANG);
+    if (!v || !v->isNumeric() || ++interpCount > 16) { finishPoll(true); return; }
+    const char* t = langFamilyToken((int)v->num);
+    if (t) addToken(scratch.pdl, t);
+    walkOids[0] = v->oid;
+    snmp.request(pr.ip, SNMP_PORT, g_cfg->snmpCommunity, pr.snmpVersion, true, walkOids, 1, SNMP_TIMEOUT_MS);
 }
 
 void pollSnmp(uint32_t now) {
@@ -338,6 +419,7 @@ void pollSnmp(uint32_t now) {
             case PollStage::General:      handleGeneral(pr); break;
             case PollStage::DeviceStatus: handleDeviceStatus(pr); break;
             case PollStage::Supplies:     handleSupplies(pr); break;
+            case PollStage::Interpreters: handleInterpreters(pr); break;
             default: finishPoll(false);
         }
         return;
@@ -445,6 +527,19 @@ void toJson(String& j) {
         j += ",\"pages\":" + String(p.hasPageCount ? String(p.pageCount) : String("null"));
         j += ",\"last_ok\":" + String(p.lastOk ? String((now - p.lastOk) / 1000) : String("null"));
         j += ",\"snmp_version\":\"" + String(p.snmpVersion ? "v2c" : "v1") + "\"";
+        j += ",\"pdl\":[";
+        {
+            int start = 0; bool first = true;
+            while (start < (int)p.pdl.length()) {
+                int c = p.pdl.indexOf(',', start);
+                if (c < 0) c = p.pdl.length();
+                if (!first) j += ",";
+                first = false;
+                j += "\"" + jsonEscape(p.pdl.substring(start, c)) + "\"";
+                start = c + 1;
+            }
+        }
+        j += "]";
         j += ",\"supplies\":[";
         for (uint8_t k = 0; k < p.supplyCount; k++) {
             const Supply& s = p.supplies[k];
@@ -470,6 +565,7 @@ void printList(Print& out) {
         if (p.name.length() || p.host.length())
             out.printf("    nome   : %s%s%s\n", p.name.c_str(), (p.name.length() && p.host.length()) ? " / " : "", p.host.c_str());
         if (p.location.length()) out.printf("    local  : %s\n", p.location.c_str());
+        if (p.pdl.length())      out.printf("    pdl    : %s\n", p.pdl.c_str());
         if (p.online) {
             out.printf("    estado : %s / %s%s%s\n", deviceStatusText(p.deviceStatus), printerStatusText(p.printerStatus),
                        p.errorState ? " - " : "", p.errorState ? errorStateText(p.errorState).c_str() : "");

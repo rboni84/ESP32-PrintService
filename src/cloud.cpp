@@ -30,6 +30,9 @@ uint32_t lastStatusSent = 0, lastPrintersSent = 0, connectedAt = 0, lastAttempt 
 uint32_t statusIntervalMs = 30000, printersIntervalMs = 60000;
 uint32_t reconnects = 0;
 uint8_t chunkBuf[PrintJob::CHUNK_MAX];
+bool lastJobReported = true;   // false quando o ultimo job.done/job.error nao pode ser enviado (link caido)
+
+bool isCloudSource(const String& s) { return s == "cloud" || s == "cloud-test"; }
 
 // ---------- utilidades ----------
 
@@ -79,9 +82,21 @@ void sendHello() {
     d["hostname"] = g_cfg->deviceName + ".local";
     d["chunk_max"] = PrintJob::CHUNK_MAX;
     d["buffer"] = PrintJob::BUFFER_SIZE;
+    d["data_timeout"] = PrintJob::dataTimeout() / 1000;
     JsonArray caps = d["capabilities"].to<JsonArray>();
-    caps.add("raw9100"); caps.add("snmp"); caps.add("mdns"); caps.add("test_page");
+    caps.add("raw9100"); caps.add("snmp"); caps.add("mdns"); caps.add("test_page"); caps.add("pdl");
+    // Ultimo trabalho originado do servidor: permite reconciliar a fila apos uma queda do link.
+    const PrintJob::Info& lj = PrintJob::info();
+    if ((lj.state == PrintJob::State::Done || lj.state == PrintJob::State::Error) && isCloudSource(lj.source)) {
+        JsonObject o = d["last_job"].to<JsonObject>();
+        o["job_id"] = lj.id;
+        o["state"] = lj.state == PrintJob::State::Done ? "done" : "error";
+        o["bytes"] = lj.written;
+        if (lj.state == PrintJob::State::Error) o["code"] = lj.error;
+        o["reported"] = lastJobReported;
+    }
     send(d);
+    lastJobReported = true;   // o hello ja levou a informacao
 }
 
 void sendStatus() {
@@ -119,8 +134,9 @@ void sendJobStatus(const char* type) {
 }
 
 void onJobDone(const PrintJob::Info& info) {
-    if (!connected) return;
-    if (info.source != "cloud" && info.source != "cloud-test") return;
+    if (!isCloudSource(info.source)) return;
+    if (!connected) { lastJobReported = false; return; }   // sera relatado no proximo hello
+    lastJobReported = true;
     JsonDocument d;
     d["type"] = info.state == PrintJob::State::Done ? "job.done" : "job.error";
     d["job_id"] = info.id;
@@ -149,6 +165,8 @@ void handleMessage(const uint8_t* payload, size_t len) {
         if (hb >= 5 && hb <= 600) statusIntervalMs = hb * 1000;
         uint32_t pi = doc["printers_interval"] | 0;
         if (pi >= 10 && pi <= 3600) printersIntervalMs = pi * 1000;
+        uint32_t dt = doc["data_timeout"] | 0;
+        if (dt >= 10 && dt <= 120) PrintJob::setDataTimeout(dt * 1000);
         Serial.println("[WS] welcome recebido");
         sendStatus();
         sendPrinters();
@@ -245,6 +263,9 @@ void onEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_DISCONNECTED:
             if (connected) { Serial.println("[WS] desconectado"); reconnects++; }
             connected = false;
+            // Sem link nao ha mais blocos: aborta ja, em vez de esperar data_timeout. O resultado
+            // (link_lost) vai no last_job do proximo hello.
+            if (PrintJob::busy() && isCloudSource(PrintJob::info().source)) PrintJob::cancel("link_lost");
             break;
         case WStype_TEXT:
             handleMessage(payload, length);

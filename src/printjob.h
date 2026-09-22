@@ -42,6 +42,10 @@ const Info& info();
 void statusJson(String& out);
 void onDone(DoneCallback cb);   // chamado ao terminar (Done ou Error); um unico ouvinte
 
+// Tempo maximo sem receber blocos do solicitante antes de cancelar com "data_timeout" (padrao 20 s).
+void setDataTimeout(uint32_t ms);
+uint32_t dataTimeout();
+
 // Pagina de teste. format: "pcl" (padrao: texto com reset PCL), "text" (texto puro + FF) ou "ps" (PostScript).
 bool printTest(const IPAddress& ip, uint16_t port, const String& format, const String& id,
                const String& source, String* err);

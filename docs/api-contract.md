@@ -1,6 +1,6 @@
 # Contrato de API: PrintService ⇄ aplicativo externo
 
-Versão do protocolo: **1**. Firmware a partir de 0.3.0.
+Versão do protocolo: **1**. Firmware a partir de 0.3.1.
 
 Este documento descreve como um servidor externo (o "aplicativo") integra-se ao dispositivo PrintService (ESP32-C6) para:
 
@@ -26,7 +26,7 @@ O aplicativo é quem provisiona. Para cada dispositivo ele gera:
 | URL WebSocket | `ws://` ou `wss://` + host + porta opcional + caminho | `wss://app.exemplo.com/ws/devices/PrintService-3A7F` |
 | Token | string opaca, até 128 caracteres, sem espaços | `eyJhbGciOi...` |
 
-Recomendação: incluir o identificador do dispositivo no caminho e emitir um token por dispositivo, revogável.
+Recomendação: incluir o tenant e o identificador do dispositivo no caminho, por exemplo `/ws/devices/{empresa_id}/{device_id}`, e emitir um token por dispositivo ou por empresa, revogável. O dispositivo usa a URL literalmente; o servidor deve conferir que `device_id` do caminho coincide com o cabeçalho `X-Device-Id`.
 
 O operador insere URL e token no dispositivo por um destes meios:
 
@@ -84,12 +84,15 @@ Tamanho máximo de um frame recebido pelo dispositivo: **15 KB**. Isso limita `j
 {
   "type": "hello", "protocol": "1",
   "device": "PrintService-3A7F", "mac": "AA:BB:CC:DD:3A:7F",
-  "fw": "0.3.0", "ip": "192.168.0.23", "hostname": "PrintService-3A7F.local",
-  "chunk_max": 8192, "buffer": 32768,
-  "capabilities": ["raw9100", "snmp", "mdns", "test_page"],
+  "fw": "0.3.1", "ip": "192.168.0.23", "hostname": "PrintService-3A7F.local",
+  "chunk_max": 8192, "buffer": 32768, "data_timeout": 20,
+  "capabilities": ["raw9100", "snmp", "mdns", "test_page", "pdl"],
+  "last_job": {"job_id": "7f3a", "state": "error", "bytes": 16384, "code": "link_lost", "reported": false},
   "ts": 12345
 }
 ```
+
+`last_job` aparece quando o último trabalho originado do servidor já terminou. `reported: false` indica que o `job.done`/`job.error` correspondente **não chegou a ser enviado** porque a conexão caiu; o servidor deve usar esse campo para fechar o registro na fila (ver 2.7).
 
 #### `status` (a cada 30 s, ou a pedido)
 
@@ -117,6 +120,7 @@ Tamanho máximo de um frame recebido pelo dispositivo: **15 KB**. Isso limita `j
       "dev_status": 2, "dev_status_text": "operando",
       "prn_status": 3, "prn_status_text": "ociosa",
       "errors": "", "pages": 48213, "last_ok": 12, "snmp_version": "v2c",
+      "pdl": ["PDF", "PS", "PCL", "PCLXL", "PJL", "URF"],
       "supplies": [
         {"desc": "Black Cartridge HP CF259A", "level": 62, "max": 100, "pct": 62, "class": 3, "type": 3}
       ]
@@ -139,6 +143,9 @@ Campos de impressora:
 | `supplies[].pct` | percentual calculado, ou -1 se desconhecido |
 | `supplies[].level` | -1 outro, -2 desconhecido, -3 "resta algum" |
 | `alert` | true se offline conhecido, dev_status 3/5, algum erro, toner ≤ 10 %, resíduo ≥ 90 % |
+| `pdl` | Linguagens que a impressora declara aceitar na porta 9100. União do TXT `pdl` do mDNS/IPP e da tabela `prtInterpreterLangFamily` (SNMP). Tokens: `PDF`, `PS`, `PCL`, `PCLXL`, `PJL`, `HPGL`, `ESCP`, `TEXT`, `XPS`, `URF`, `PWG`, `JPEG`, `RAW`. Lista vazia = desconhecido (impressora sem Printer-MIB e sem IPP). |
+
+**Uso do `pdl` pelo servidor.** O dispositivo não converte conteúdo. Se `pdl` contém `PDF`, envie o PDF como está. Se não contém, converta antes de `job.start`: com Ghostscript, `-sDEVICE=pxlmono` ou `pxlcolor` gera PCL-XL (token `PCLXL`), `-sDEVICE=ljet4` gera PCL5 monocromático (`PCL`), `-sDEVICE=ps2write` gera PostScript (`PS`). Lista vazia: tente PDF e confirme com uma página de teste; muitas impressoras aceitam mais do que anunciam.
 
 #### `job.ready`, `job.ack`, `job.done`, `job.error`, `job.status`
 
@@ -152,7 +159,7 @@ Ver fluxo em 2.5.
 
 | `type` | Campos | Efeito |
 |---|---|---|
-| `welcome` | `status_interval` (s, 5–600), `printers_interval` (s, 10–3600), opcionais | Ajusta os intervalos periódicos. O dispositivo responde com `status` e `printers`. Recomendado enviar logo após o `hello`. |
+| `welcome` | `status_interval` (s, 5–600), `printers_interval` (s, 10–3600), `data_timeout` (s, 10–120), todos opcionais | Ajusta os intervalos periódicos e o tempo que o dispositivo espera por blocos antes de cancelar um trabalho. O dispositivo responde com `status` e `printers`. Recomendado enviar logo após o `hello`. |
 | `ping` | — | Responde `pong`. (Ping de aplicação; o ping WebSocket também funciona.) |
 | `get_status` | — | Responde `status`. |
 | `get_printers` | — | Responde `printers`. |
@@ -196,7 +203,8 @@ Regras de controle de fluxo:
 2. Cada bloco tem no máximo `chunk_max` bytes **binários** (8192). Blocos maiores geram `chunk_too_large` e cancelam o trabalho.
 3. `seq` começa em 0 e é devolvido no `job.ack` para correlação. O dispositivo não reordena.
 4. O último bloco leva `last: true`. Um `job.chunk` com `data` vazio e `last: true` é válido para encerrar.
-5. Se o dispositivo ficar 20 s sem receber blocos, cancela com `data_timeout`. Se a impressora parar de aceitar dados por 20 s, `write_timeout`.
+5. Se o dispositivo ficar `data_timeout` segundos (padrão 20, ajustável no `welcome`) sem receber blocos, cancela com `data_timeout`. Se a impressora parar de aceitar dados por 20 s, `write_timeout`.
+6. **Gere o conteúdo inteiro antes do `job.start`.** O relógio de `data_timeout` corre entre blocos; renderizar PDF, DANFE ou packing list depois de abrir o trabalho é a forma mais comum de estourá-lo.
 
 Exemplo de bloco:
 
@@ -239,8 +247,23 @@ Códigos de erro de trabalho:
 | `write_timeout` | 20 s sem a impressora consumir dados |
 | `connection_closed` | Impressora fechou a conexão antes do fim |
 | `canceled` | `job.cancel` recebido |
+| `link_lost` | O WebSocket caiu durante o trabalho; o dispositivo abortou e fechou a conexão com a impressora. Relatado só via `last_job` no próximo `hello`. |
 
 Após `job.done` ou `job.error` o dispositivo está livre para o próximo `job.start`.
+
+### 2.7 Quedas de conexão e reconciliação
+
+O dispositivo reconecta a cada 10 s após qualquer queda (timeout de requisição do Cloud Run, deploy, perda de WiFi). Consequências para o servidor:
+
+- Um trabalho em curso no momento da queda é abortado imediatamente com `link_lost`. Parte do documento pode já ter chegado à impressora; o servidor decide se reenvia por inteiro.
+- O `job.error` dessa queda não é entregue. No `hello` seguinte, `last_job` traz o `job_id`, o estado e `reported: false`. O servidor deve fechar o registro correspondente como erro e, se for o caso, reenfileirar.
+- Se `last_job.reported` for `true`, o servidor já recebeu o `job.done`/`job.error` e não precisa agir.
+- A fila deve ser lida do banco, não da memória do processo: em um serviço com várias instâncias, o job pode ser criado em uma instância e o dispositivo estar conectado em outra.
+- Um dispositivo conectado mantém a instância viva. Em Cloud Run, use `min-instances` ≥ 1 e timeout de requisição de 3600 s, ou um gateway WebSocket dedicado que consulte a mesma fila.
+
+### 2.8 Roteamento junto a outros agentes
+
+Impressoras reportadas pelo dispositivo pertencem a ele para fins de entrega: registre-as com o identificador do dispositivo como agente e torne-as elegíveis **apenas** para esse dispositivo. Sem esse filtro, um agente de impressão convencional na mesma rede pode disputar a mesma fila e enviar um formato que a impressora não aceita.
 
 ### 2.6 Página de teste
 
@@ -295,7 +318,8 @@ curl -u admin:senha http://PrintService-3A7F.local/api/print/status
 | Buffer de saída | 32 768 bytes |
 | Frame WebSocket máximo recebido | 15 KB |
 | Timeout de conexão com a impressora | 3 s |
-| Timeout sem progresso (dados ou escrita) | 20 s |
+| Timeout sem receber blocos (`data_timeout`) | 20 s, ajustável de 10 a 120 s no `welcome` |
+| Timeout da impressora sem consumir dados | 20 s |
 | Intervalo de `status` | 30 s (ajustável por `welcome`) |
 | Intervalo de `printers` | 60 s (ajustável por `welcome`) |
 | Reconexão WebSocket | a cada 10 s |
@@ -306,9 +330,10 @@ Indicação no LED durante impressão: ciano piscando (ver `status-led.md`).
 
 ## 5. Checklist para implementar o servidor
 
-1. Aceitar a conexão WebSocket, validar `Authorization: Bearer` e associar a sessão ao `X-Device-Id`.
-2. Responder ao `hello` com `welcome` (opcionalmente ajustando intervalos).
-3. Persistir `status` e `printers` recebidos; considerar o dispositivo offline se ficar sem `status` por 3 intervalos.
-4. Para imprimir: converter o documento no formato da impressora, enviar `job.start`, depois blocos de até 8 KB em base64, um por vez, aguardando `job.ack`. Encerrar com `last: true`. Tratar `job.done`/`job.error`.
+1. Aceitar a conexão WebSocket, validar `Authorization: Bearer` contra o tenant do caminho e conferir `X-Device-Id`.
+2. Ler `last_job` do `hello`; se `reported` for `false`, fechar o job na fila como erro. Responder com `welcome`, ajustando `data_timeout` se a geração de conteúdo for lenta.
+3. Persistir `status` e `printers` (incluindo `pdl`); considerar o dispositivo offline se ficar sem `status` por 3 intervalos. Registrar as impressoras como pertencentes ao dispositivo.
+4. Para imprimir: gerar o documento inteiro, escolher o formato pelo `pdl` (PDF direto ou conversão), enviar `job.start`, depois blocos de até 8 KB em base64, um por vez, aguardando `job.ack`. Encerrar com `last: true`. Tratar `job.done`/`job.error`.
 5. Não enviar `job.start` enquanto outro trabalho do mesmo dispositivo não terminar.
-6. Responder pings WebSocket.
+6. Ler a fila do banco a cada poucos segundos para o dispositivo conectado, não de memória.
+7. Responder pings WebSocket.

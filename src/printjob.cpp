@@ -24,7 +24,8 @@ bool finishRequested = false;
 uint32_t lastProgress = 0;
 
 const uint32_t CONNECT_TIMEOUT_MS = 3000;
-const uint32_t STALL_TIMEOUT_MS = 20000;   // sem progresso de escrita por 20 s -> erro
+const uint32_t STALL_TIMEOUT_MS = 20000;   // impressora sem consumir dados por 20 s -> write_timeout
+uint32_t dataTimeoutMs = 20000;            // solicitante sem enviar blocos -> data_timeout (ajustavel)
 const uint32_t CLOSE_GRACE_MS = 800;       // espera apos o ultimo byte antes de fechar
 
 void compact() {
@@ -207,10 +208,13 @@ void loop() {
                           (unsigned)job.written, (unsigned long)(now - job.startedAt));
             end(State::Done, nullptr);
         }
-    } else if (now - lastProgress > STALL_TIMEOUT_MS) {
+    } else if (now - lastProgress > dataTimeoutMs) {
         end(State::Error, "data_timeout");   // solicitante parou de enviar blocos
     }
 }
+
+void setDataTimeout(uint32_t ms) { if (ms >= 5000 && ms <= 300000) dataTimeoutMs = ms; }
+uint32_t dataTimeout() { return dataTimeoutMs; }
 
 void statusJson(String& j) {
     const char* st = "idle";
