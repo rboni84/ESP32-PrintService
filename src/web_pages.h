@@ -33,13 +33,22 @@ button:disabled{opacity:.6;cursor:default}
 .tab{display:none}.tab.on{display:block}
 .lnk{color:var(--acc);font-size:14px}
 .prn{border-left:4px solid var(--muted)}.prn.ok{border-left-color:var(--ok)}.prn.warn{border-left-color:var(--warn)}.prn.err{border-left-color:var(--err)}
-.prn h2{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.prn h2 span{font-weight:400;font-size:13px;color:var(--muted)}
+.prn h2{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.prn h2 .badge{font-size:13px;font-weight:700;letter-spacing:.5px;padding:4px 12px;color:#fff}
 .prn .meta{color:var(--muted);font-size:13px;margin:0 0 8px}
 .prn .errs{color:var(--err);font-size:13px;margin:0 0 8px}
 .sup{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;font-size:13px;margin-top:6px}
 .bar{grid-column:1/3;height:8px;background:var(--bd);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ok)}
 .bar.warn i{background:var(--warn)}.bar.err i{background:var(--err)}
 .prn .act{display:flex;gap:8px;justify-content:flex-end}.prn .act button{margin-top:8px;padding:6px 10px;font-size:13px}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:16px;z-index:10}
+.modal.on{display:flex}.mbox{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;width:100%;max-width:560px;max-height:90vh;overflow:auto}
+.mbox h2{margin:0 0 10px;font-size:16px}.mrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:13px;color:var(--muted)}
+.mrow .badge{font-size:13px;font-weight:700;padding:4px 12px;color:#fff}
+.prog{height:10px;background:var(--bd);border-radius:5px;overflow:hidden}.prog i{display:block;height:100%;width:0;background:var(--acc);transition:width .3s}
+.prog.ok i{background:var(--ok)}.prog.err i{background:var(--err)}
+#m-log{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:10px 0}
+.mbox .row{justify-content:flex-end}.mbox .row>*{flex:0 0 auto}
 </style></head><body>
 <header><h1>PrintService <small id="fw"></small></h1><small id="devname">Servidor de impressoras</small></header>
 <nav><a href="#status" class="on" data-t="status">Status</a><a href="#printers" data-t="printers">Impressoras</a><a href="#wifi" data-t="wifi">Rede WiFi</a><a href="#device" data-t="device">Dispositivo</a><a href="#system" data-t="system">Sistema</a></nav>
@@ -68,8 +77,12 @@ button:disabled{opacity:.6;cursor:default}
 <p class="hint">Impressoras que anunciam IPP/LPD/JetDirect via mDNS aparecem sozinhas. As demais podem ser cadastradas por IP (SNMP porta 161, community configurável na aba Dispositivo).</p>
 </div>
 <div class="card"><h2>Impressão</h2>
-<label>Formato da página de teste</label><select id="p-fmt"><option value="pcl">PCL / texto (laser e multifuncionais em geral)</option><option value="text">Texto puro + avanço de página</option><option value="ps">PostScript</option></select>
-<p class="hint">A página de teste é enviada em raw para a porta 9100 da impressora (JetDirect). Use o botão "Página de teste" em cada impressora acima.</p>
+<div class="row">
+<div><label>Formato da página de teste</label><select id="p-fmt"><option value="auto">Automático (PDF via IPP, PCL via 9100)</option><option value="pdf">PDF</option><option value="pcl">PCL / texto</option><option value="text">Texto puro + avanço de página</option><option value="ps">PostScript</option></select></div>
+<div><label>Transporte</label><select id="p-tr"><option value="auto">Automático (portas anunciadas primeiro)</option><option value="raw">Raw / JetDirect (porta 9100)</option><option value="ipp">IPP (porta 631)</option><option value="lpd">LPD / LPR (porta 515)</option></select></div>
+<div><label>Fila LPD <span class="hint">(vazio = anunciada ou "lp")</span></label><input id="p-queue" maxlength="32" placeholder="lp"></div>
+</div>
+<p class="hint">Impressoras domésticas e AirPrint costumam não abrir a porta 9100; nesses casos o IPP com PDF é o caminho. LPD atende modelos antigos que só expõem a porta 515. Use o botão "Página de teste" em cada impressora acima.</p>
 <h2 style="margin-top:14px">Último trabalho</h2><dl id="p-job"><dt>Estado</dt><dd>-</dd></dl>
 <div class="row"><button class="sec" id="b-prn-cancel">Cancelar trabalho em curso</button></div>
 </div></section>
@@ -111,6 +124,13 @@ button:disabled{opacity:.6;cursor:default}
 <p class="hint">Restaurar padrões apaga WiFi, senhas, community SNMP e impressoras cadastradas, e reinicia em modo AP. O mesmo efeito é obtido segurando o botão BOOT da placa por 5 segundos.</p>
 </div></section>
 </main>
+<div id="modal" class="modal"><div class="mbox">
+<h2 id="m-title">Página de teste</h2>
+<div class="mrow"><span id="m-state" class="badge">iniciando</span><span id="m-target"></span></div>
+<div class="prog" id="m-prog"><i id="m-bar"></i></div><div class="hint" id="m-bytes"></div>
+<div id="m-log"></div>
+<div class="row"><button class="sec" id="m-cancel">Cancelar</button><button id="m-close">Fechar</button></div>
+</div></div>
 <script>
 const $=s=>document.querySelector(s);
 function show(t){document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('on',e.id==='t-'+t));document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.t===t));}
@@ -138,14 +158,15 @@ const bar=p<0?'':'<div class="bar '+cls+'"><i style="width:'+p+'%"></i></div>';r
 async function printers(){try{const r=await fetch('/api/printers');const j=await r.json();const el=$('#prn-list');
 if(!j.printers.length){el.innerHTML='<div class="card"><h2>Impressoras</h2><p class="hint">'+(j.sta?'Nenhuma impressora encontrada. A descoberta mDNS roda a cada 2 minutos; você também pode adicionar por IP abaixo.':'Conecte o dispositivo a uma rede WiFi para iniciar o monitoramento.')+'</p></div>';return}
 el.innerHTML=j.printers.map(p=>{const cls=!p.online?'err':(p.alert?'warn':'ok');const title=esc(p.name||p.model||p.host||p.ip);
-const st=!p.online?'<span class="badge err">offline</span>':(p.alert?'<span class="badge warn">alerta</span>':'<span class="badge ok">ok</span>');
-let meta=[p.model&&p.model!==p.name?esc(p.model):'',esc(p.ip)+(p.host?' · '+esc(p.host):''),p.location?esc(p.location):'',p.manual?'cadastro manual':'descoberta mDNS',p.pdl&&p.pdl.length?'linguagens: '+esc(p.pdl.join(', ')):''].filter(Boolean).join(' · ');
+const st=!p.online?'<span class="badge err">OFFLINE</span>':(p.alert?'<span class="badge warn">ALERTA</span>':'<span class="badge ok">ONLINE</span>');
+const ports=p.ports?[p.ports.raw?'raw '+p.ports.raw:'',p.ports.ipp?'IPP '+p.ports.ipp+(p.ipp_path||''):'',p.ports.lpd?'LPD '+p.ports.lpd+(p.lpd_queue?'/'+p.lpd_queue:''):''].filter(Boolean).join(', '):'';
+let meta=[p.model&&p.model!==p.name?esc(p.model):'',esc(p.ip)+(p.host?' · '+esc(p.host):''),p.location?esc(p.location):'',p.manual?'cadastro manual':'descoberta mDNS',p.pdl&&p.pdl.length?'linguagens: '+esc(p.pdl.join(', ')):'',ports?'portas: '+esc(ports):''].filter(Boolean).join(' · ');
 let body='';if(p.online){body+='<p class="meta">'+esc(p.dev_status_text)+' / '+esc(p.prn_status_text)+(p.pages!=null?' · '+p.pages.toLocaleString('pt-BR')+' páginas':'')+(p.last_ok!=null?' · há '+p.last_ok+' s':'')+'</p>';
 if(p.errors)body+='<p class="errs">⚠ '+esc(p.errors)+'</p>';if(p.supplies.length)body+='<div class="sup">'+p.supplies.map(supHtml).join('')+'</div>'}
 else body+='<p class="meta">Sem resposta SNMP'+(p.last_ok!=null?' (última há '+p.last_ok+' s)':'')+'</p>';
 return '<div class="card prn '+cls+'"><h2>'+title+' '+st+'</h2><p class="meta">'+meta+'</p>'+body+'<div class="act"><button class="sec" data-test="'+esc(p.ip)+'">Página de teste</button><button class="sec" data-rm="'+esc(p.ip)+'">Remover</button></div></div>'}).join('');
 el.querySelectorAll('[data-rm]').forEach(b=>b.onclick=async()=>{if(confirm('Remover '+b.dataset.rm+'?')){try{await post('/api/printers/remove',null,{ip:b.dataset.rm});printers()}catch(x){msg(x.message,false)}}});
-el.querySelectorAll('[data-test]').forEach(b=>b.onclick=async()=>{try{const j=await post('/api/print/test',null,{ip:b.dataset.test,format:$('#p-fmt').value});msg('Página de teste enviada ('+j.job_id+'). Acompanhe em "Último trabalho".',true);setTimeout(printStatus,1500)}catch(x){msg(x.message,false)}});
+el.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>testPage(b.dataset.test));
 }catch(e){}}
 printers();setInterval(printers,10000);
 $('#f-prn').onsubmit=async e=>{e.preventDefault();try{await post('/api/printers',e.target);msg('Impressora adicionada.',true);$('#p-ip').value='';setTimeout(printers,500)}catch(x){msg(x.message,false)}};
@@ -153,10 +174,34 @@ $('#b-prn-refresh').onclick=async()=>{try{await post('/api/printers/refresh');ms
 const jobState={idle:'nenhum',streaming:'enviando',finishing:'finalizando',done:'concluído',error:'erro'};
 async function printStatus(){try{const r=await fetch('/api/print/status');const j=await r.json();const d=$('#p-job');
 let h='<dt>Estado</dt><dd>'+(jobState[j.state]||j.state)+'</dd>';
-if(j.job){h+='<dt>Trabalho</dt><dd>'+esc(j.job.id)+(j.job.name?' · '+esc(j.job.name):'')+'</dd><dt>Impressora</dt><dd>'+esc(j.job.printer)+':'+j.job.port+'</dd><dt>Bytes</dt><dd>'+j.job.written+(j.job.expected?' / '+j.job.expected:'')+'</dd><dt>Duração</dt><dd>'+(j.job.duration_ms/1000).toFixed(1)+' s</dd>';if(j.job.error)h+='<dt>Erro</dt><dd class="errs">'+esc(j.job.error)+'</dd>'}
+if(j.job){h+='<dt>Trabalho</dt><dd>'+esc(j.job.id)+(j.job.name?' · '+esc(j.job.name):'')+'</dd><dt>Impressora</dt><dd>'+esc(j.job.printer)+':'+j.job.port+' via '+esc(j.job.transport)+(j.job.format?' · '+esc(j.job.format):'')+'</dd><dt>Bytes</dt><dd>'+j.job.written+(j.job.expected?' / '+j.job.expected:'')+'</dd><dt>Duração</dt><dd>'+(j.job.duration_ms/1000).toFixed(1)+' s</dd>';if(j.job.error)h+='<dt>Erro</dt><dd class="errs">'+esc(j.job.error)+(j.job.detail?' · '+esc(j.job.detail):'')+'</dd>';else if(j.job.detail)h+='<dt>Resposta</dt><dd>'+esc(j.job.detail)+'</dd>'}
 d.innerHTML=h;$('#b-prn-cancel').disabled=!j.busy;}catch(e){}}
 printStatus();setInterval(printStatus,3000);
 $('#b-prn-cancel').onclick=async()=>{try{await post('/api/print/cancel');msg('Trabalho cancelado.',true);printStatus()}catch(x){msg(x.message,false)}};
+/* ---- modal da página de teste ---- */
+let mTimer=null,mJob=null,mState='',mLastDetail='',mConn=false;
+const trName={raw:'raw / JetDirect',ipp:'IPP',lpd:'LPD',auto:'automático'};
+function mlog(t){const l=$('#m-log');const d=document.createElement('div');d.textContent='['+new Date().toLocaleTimeString('pt-BR')+'] '+t;l.appendChild(d);l.scrollTop=l.scrollHeight}
+function mset(cls,txt){const s=$('#m-state');s.className='badge '+(cls||'');s.textContent=txt;$('#m-prog').className='prog '+(cls==='ok'||cls==='err'?cls:'')}
+function mstop(){if(mTimer){clearInterval(mTimer);mTimer=null}$('#m-cancel').disabled=true;printStatus();printers()}
+function openModal(target){$('#m-target').textContent=target;$('#m-log').innerHTML='';$('#m-bar').style.width='0%';$('#m-bytes').textContent='';mset('','iniciando');$('#m-cancel').disabled=false;mState='';mLastDetail='';mJob=null;mConn=false;$('#modal').classList.add('on')}
+$('#m-close').onclick=()=>{$('#modal').classList.remove('on');if(mTimer){clearInterval(mTimer);mTimer=null}};
+$('#m-cancel').onclick=async()=>{try{await post('/api/print/cancel');mlog('Cancelamento solicitado')}catch(x){mlog('Cancelar: '+x.message)}};
+async function pollModal(){try{const r=await fetch('/api/print/status');const j=await r.json();
+if(j.state==='connecting'){if(mState!=='connecting'){mState='connecting';mlog('Conectando à impressora (até 3 s por porta)…')}return}
+const jb=j.job;if(!jb||jb.id!==mJob)return;
+if(!mConn&&jb.state!=='error'){mConn=true;mlog('Conectado via '+(trName[jb.transport]||jb.transport)+' na porta '+jb.port+(jb.queue?' · fila '+jb.queue:''));mset('warn','enviando')}
+if(jb.expected){const pct=Math.min(100,Math.round(jb.written*100/jb.expected));$('#m-bar').style.width=pct+'%';$('#m-bytes').textContent=jb.written.toLocaleString('pt-BR')+' / '+jb.expected.toLocaleString('pt-BR')+' bytes ('+pct+'%)'}else $('#m-bytes').textContent=jb.written.toLocaleString('pt-BR')+' bytes';
+if(jb.detail&&jb.detail!==mLastDetail&&jb.state!=='done'&&jb.state!=='error'){mLastDetail=jb.detail;mlog(jb.detail)}
+if(jb.state!==mState){mState=jb.state;
+if(jb.state==='streaming')mlog('Enviando documento ('+(jb.format||'raw')+')…');
+else if(jb.state==='finishing')mlog(jb.transport==='ipp'?'Documento enviado. Aguardando resposta IPP da impressora…':jb.transport==='lpd'?'Documento enviado. Aguardando confirmação LPD…':'Documento enviado. Fechando conexão…');
+else if(jb.state==='done'){$('#m-bar').style.width='100%';mlog('Concluído em '+(jb.duration_ms/1000).toFixed(1)+' s'+(jb.detail?' · '+jb.detail:''));mlog(jb.transport==='ipp'?'A impressora aceitou o trabalho. Se nada sair, verifique papel e fila na própria impressora.':'Bytes entregues. Via raw a impressora não confirma se entendeu o formato: se nada sair, tente outro formato ou IPP.');mset('ok','concluído');mstop()}
+else if(jb.state==='error'){mlog('ERRO: '+jb.error+(jb.detail?' · '+jb.detail:''));const d=jb.detail||'';if(/recusad|refused|errno 111\]/i.test(d))mlog('Dica: a impressora respondeu, mas a porta está fechada. Habilite JetDirect/RAW (9100) ou IPP/AirPrint (631) no painel dela.');else if(/sem resposta|inalcan|errno (119|116|118|101)\]/i.test(d))mlog('Dica: nenhum pacote TCP voltou. Confirme o IP no painel da impressora, se ela está na mesma rede/VLAN do dispositivo e se há firewall entre as redes. Ping e SNMP (UDP) funcionarem não garante TCP.');mset('err','erro');mstop()}}
+}catch(e){}}
+async function testPage(ip){const fmt=$('#p-fmt').value,tr=$('#p-tr').value;openModal(ip);mlog('Solicitando página de teste para '+ip+' · formato '+fmt+' · transporte '+(trName[tr]||tr));
+try{const j=await post('/api/print/test',null,{ip,format:fmt,transport:tr,queue:$('#p-queue').value.trim()});mJob=j.job_id;mlog('Pedido aceito · trabalho '+j.job_id);mset('warn','conectando');mTimer=setInterval(pollModal,500);pollModal()}
+catch(x){mlog('Falha ao iniciar: '+x.message);mset('err','falhou');$('#m-cancel').disabled=true}}
 async function saveCloud(e){e.preventDefault();try{const j=await post('/api/cloud',e.target);msg('Servidor externo salvo. Estado: '+j.state,true);$('#c-token').value=''}catch(x){msg(x.message,false)}}
 $('#f-cloud').onsubmit=saveCloud;
 async function scan(first){if(first){$('#w-scan').disabled=true;$('#w-scan').textContent='Buscando…'}
@@ -167,7 +212,7 @@ j.networks.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o
 }catch(e){msg('Falha ao buscar redes',false)}
 $('#w-scan').disabled=false;$('#w-scan').textContent='Buscar'}
 $('#w-scan').onclick=()=>scan(true);$('#w-list').onchange=e=>{if(e.target.value)$('#w-ssid').value=e.target.value};
-async function post(url,form,obj){const body=form?new URLSearchParams(new FormData(form)):(obj?new URLSearchParams(obj):'');const r=await fetch(url,{method:'POST',body});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+async function post(url,form,obj){const body=form?new URLSearchParams(new FormData(form)):(obj?new URLSearchParams(obj):'');const r=await fetch(url,{method:'POST',body});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error((j.error||('HTTP '+r.status))+(j.detail?' · '+j.detail:''));return j}
 $('#f-wifi').onsubmit=async e=>{e.preventDefault();if(!$('#w-ssid').value){msg('Informe o SSID',false);return}
 try{await post('/api/wifi',e.target);msg('Salvo. Reiniciando... conecte-se à mesma rede para acessar o dispositivo.',true)}catch(x){msg(x.message,false)}};
 $('#f-device').onsubmit=async e=>{e.preventDefault();try{await post('/api/device',e.target);msg('Configurações salvas.',true);$('#d-appass').value='';$('#d-adminpw').value='';status()}catch(x){msg(x.message,false)}};

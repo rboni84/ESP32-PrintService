@@ -44,9 +44,18 @@ struct {
     int rejectCode = 0;
     const char* rejectMsg = "";
     IPAddress ip;
-    uint16_t port = 9100;
-    String name, id;
+    uint16_t port = 0;   // 0 = usar as portas conhecidas da impressora
+    PrintJob::Transport transport = PrintJob::Transport::Auto;
+    String name, id, format, queue;
 } upload;
+
+// Pedido de pagina de teste vindo da web. A conexao com a impressora bloqueia ate 3 s por porta e
+// NAO pode rodar na task async_tcp (watchdog de 5 s): o handler so enfileira e Portal::loop executa.
+struct {
+    volatile bool pending = false;
+    PrintJob::Target target;
+    String format, id;
+} testReq;
 
 // ---------- utilidades ----------
 
@@ -269,6 +278,20 @@ void setupRoutes() {
     server.on("/api/device", HTTP_POST, handleDeviceSave);
 
     // ---- impressoras (fase 2) ----
+    // ATENCAO: um handler em "/x" tambem atende "/x/qualquer-coisa" (canHandle aceita url que comeca
+    // com uri + "/"). Rotas mais especificas devem ser registradas ANTES da generica.
+    server.on("/api/printers/remove", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        if (!req->hasParam("ip", true) || !PrinterMonitor::remove(req->getParam("ip", true)->value())) {
+            sendError(req, 404, "impressora nao encontrada"); return;
+        }
+        sendJson(req, 200, "{\"ok\":true}");
+    });
+    server.on("/api/printers/refresh", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        PrinterMonitor::refreshNow();
+        sendJson(req, 200, "{\"ok\":true}");
+    });
     server.on("/api/printers", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!checkAuth(req)) return;
         String j;
@@ -281,18 +304,6 @@ void setupRoutes() {
         if (!req->hasParam("ip", true)) { sendError(req, 400, "IP obrigatorio"); return; }
         String err;
         if (!PrinterMonitor::addManual(req->getParam("ip", true)->value(), &err)) { sendError(req, 400, err.c_str()); return; }
-        sendJson(req, 200, "{\"ok\":true}");
-    });
-    server.on("/api/printers/remove", HTTP_POST, [](AsyncWebServerRequest* req) {
-        if (!checkAuth(req)) return;
-        if (!req->hasParam("ip", true) || !PrinterMonitor::remove(req->getParam("ip", true)->value())) {
-            sendError(req, 404, "impressora nao encontrada"); return;
-        }
-        sendJson(req, 200, "{\"ok\":true}");
-    });
-    server.on("/api/printers/refresh", HTTP_POST, [](AsyncWebServerRequest* req) {
-        if (!checkAuth(req)) return;
-        PrinterMonitor::refreshNow();
         sendJson(req, 200, "{\"ok\":true}");
     });
 
@@ -336,11 +347,24 @@ void setupRoutes() {
         if (!checkAuth(req)) return;
         IPAddress ip;
         if (!req->hasParam("ip", true) || !ip.fromString(req->getParam("ip", true)->value())) { sendError(req, 400, "IP invalido"); return; }
-        uint16_t port = req->hasParam("port", true) ? (uint16_t)req->getParam("port", true)->value().toInt() : PrintJob::DEFAULT_PORT;
-        String fmt = req->hasParam("format", true) ? req->getParam("format", true)->value() : "pcl";
-        String err;
-        if (!PrintJob::printTest(ip, port, fmt, "", "local-test", &err)) { sendError(req, err == "busy" ? 409 : 502, err.c_str()); return; }
-        sendJson(req, 202, "{\"ok\":true,\"job_id\":\"" + jsonEscape(PrintJob::info().id) + "\"}");
+        PrintJob::Target t;
+        PrinterMonitor::fillTarget(ip, t);
+        t.transport = PrintJob::parseTransport(req->hasParam("transport", true) ? req->getParam("transport", true)->value() : "auto");
+        if (req->hasParam("port", true)) {
+            uint16_t port = (uint16_t)req->getParam("port", true)->value().toInt();
+            if (port) {
+                if (t.transport == PrintJob::Transport::Ipp) t.ippPort = port;
+                else if (t.transport == PrintJob::Transport::Lpd) t.lpdPort = port;
+                else t.rawPort = port;
+            }
+        }
+        if (req->hasParam("queue", true) && req->getParam("queue", true)->value().length()) t.lpdQueue = req->getParam("queue", true)->value();
+        if (PrintJob::busy() || testReq.pending || upload.ready) { sendError(req, 409, "busy"); return; }
+        testReq.target = t;
+        testReq.format = req->hasParam("format", true) ? req->getParam("format", true)->value() : "auto";
+        testReq.id = "test-" + String(millis());
+        testReq.pending = true;   // executado em Portal::loop; acompanhe por GET /api/print/status
+        sendJson(req, 202, "{\"ok\":true,\"queued\":true,\"job_id\":\"" + testReq.id + "\"}");
     });
     server.on("/api/print/cancel", HTTP_POST, [](AsyncWebServerRequest* req) {
         if (!checkAuth(req)) return;
@@ -358,7 +382,10 @@ void setupRoutes() {
             IPAddress ip;
             if (!req->hasParam("ip") || !ip.fromString(req->getParam("ip")->value())) { upload.len = 0; sendError(req, 400, "parametro ip invalido"); return; }
             upload.ip = ip;
-            upload.port = req->hasParam("port") ? (uint16_t)req->getParam("port")->value().toInt() : PrintJob::DEFAULT_PORT;
+            upload.port = req->hasParam("port") ? (uint16_t)req->getParam("port")->value().toInt() : 0;
+            upload.transport = PrintJob::parseTransport(req->hasParam("transport") ? req->getParam("transport")->value() : "auto");
+            upload.format = req->hasParam("format") ? req->getParam("format")->value() : "";
+            upload.queue = req->hasParam("queue") ? req->getParam("queue")->value() : "";
             upload.name = req->hasParam("name") ? req->getParam("name")->value() : "upload";
             upload.id = "local-" + String(millis());
             upload.ready = true;
@@ -431,9 +458,25 @@ void Portal::loop() {
 
     if (apActive) dns.processNextRequest();
 
+    if (testReq.pending) {
+        String err;
+        if (!PrintJob::printTest(testReq.target, testReq.format, testReq.id, "local-test", &err))
+            Serial.printf("[PRT] pagina de teste nao iniciada: %s\n", err.c_str());
+        testReq.pending = false;
+    }
+
     if (upload.ready) {
         String err;
-        if (PrintJob::start(upload.id, upload.ip, upload.port, upload.len, upload.name, "local", &err)) {
+        PrintJob::Target t;
+        PrinterMonitor::fillTarget(upload.ip, t);
+        t.transport = upload.transport;
+        if (upload.port) {
+            if (upload.transport == PrintJob::Transport::Ipp) t.ippPort = upload.port;
+            else if (upload.transport == PrintJob::Transport::Lpd) t.lpdPort = upload.port;
+            else t.rawPort = upload.port;
+        }
+        if (upload.queue.length()) t.lpdQueue = upload.queue;
+        if (PrintJob::start(upload.id, t, upload.len, upload.name, "local", upload.format, &err)) {
             if (!PrintJob::write(upload.buf, upload.len)) PrintJob::cancel("overflow");
             else PrintJob::finish();
         } else {

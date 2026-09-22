@@ -22,7 +22,8 @@ As prioridades vão de cima para baixo: a primeira condição verdadeira define 
 
 Notas:
 
-- "Impressora conhecida" é a que já respondeu alguma vez ou foi cadastrada manualmente. Uma impressora vista só por mDNS e que nunca respondeu SNMP não acende o vermelho.
+- "Impressora conhecida" é a que já respondeu alguma vez ou foi cadastrada manualmente. O vermelho só acende após 3 sondagens seguidas sem resposta, cerca de 90 s; antes disso a impressora conta como "ainda não sondada". Uma impressora vista só por mDNS e que nunca respondeu SNMP não acende o vermelho.
+- O AP de configuração continua ligado por 2 min após o WiFi conectar (`AP=1 STA=1` no serial). Isso não muda a cor: com WiFi conectado, o LED reflete só as impressoras.
 - Alerta de suprimento: toner ou cilindro com 10% ou menos, reservatório de resíduo com 90% ou mais, ou qualquer erro em `hrPrinterDetectedErrorState` (sem papel, tampa aberta, atolamento, offline, manutenção).
 - O AP de configuração desliga sozinho 2 min após o WiFi estabilizar, se ninguém estiver conectado a ele. Ele volta se o WiFi ficar 60 s fora.
 - O brilho é limitado por software (cerca de 12% do máximo) para não ofuscar.

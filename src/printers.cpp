@@ -207,6 +207,23 @@ void handleDiscoveryResults(mdns_result_t* results) {
         bool isNew = !pr->viaMdns && !pr->manual;
         pr->viaMdns = true;
         pr->lastSeenMdns = now;
+        if (r->port) {
+            switch (serviceIdx) {   // ordem de SERVICES[]
+                case 0: {
+                    pr->ippPort = r->port;
+                    String rp = txtValue(r, "rp");
+                    if (rp.length()) pr->ippPath = rp.startsWith("/") ? rp : "/" + rp;
+                    break;
+                }
+                case 1: {
+                    pr->lpdPort = r->port;
+                    String rp = txtValue(r, "rp");
+                    if (rp.length()) pr->lpdQueue = rp;
+                    break;
+                }
+                case 2: pr->rawPort = r->port; break;
+            }
+        }
         if (r->hostname && pr->host.isEmpty()) pr->host = r->hostname;
         if (r->instance_name && pr->name.isEmpty()) pr->name = r->instance_name;
         String ty = txtValue(r, "ty");
@@ -440,8 +457,14 @@ void pollSnmp(uint32_t now) {
 
 // ---------- Printer ----------
 
+bool Printer::isOfflineKnown() const {
+    // So acusa offline apos 3 sondagens seguidas sem resposta (~90 s), e apenas para impressoras
+    // que ja responderam ou foram cadastradas manualmente. Antes disso e "ainda nao sondada".
+    return !online && fails >= 3 && (everOnline || manual);
+}
+
 bool Printer::hasAlert() const {
-    if (!online) return everOnline || manual;
+    if (!online) return isOfflineKnown();
     if (deviceStatus == 3 || deviceStatus == 5) return true;
     if (errorState) return true;
     for (uint8_t i = 0; i < supplyCount; i++) {
@@ -540,6 +563,11 @@ void toJson(String& j) {
             }
         }
         j += "]";
+        j += ",\"ports\":{\"raw\":" + String(p.rawPort ? String(p.rawPort) : String("null")) +
+             ",\"ipp\":" + String(p.ippPort ? String(p.ippPort) : String("null")) +
+             ",\"lpd\":" + String(p.lpdPort ? String(p.lpdPort) : String("null")) + "}";
+        j += ",\"ipp_path\":\"" + jsonEscape(p.ippPath) + "\"";
+        j += ",\"lpd_queue\":\"" + jsonEscape(p.lpdQueue) + "\"";
         j += ",\"supplies\":[";
         for (uint8_t k = 0; k < p.supplyCount; k++) {
             const Supply& s = p.supplies[k];
@@ -566,6 +594,10 @@ void printList(Print& out) {
             out.printf("    nome   : %s%s%s\n", p.name.c_str(), (p.name.length() && p.host.length()) ? " / " : "", p.host.c_str());
         if (p.location.length()) out.printf("    local  : %s\n", p.location.c_str());
         if (p.pdl.length())      out.printf("    pdl    : %s\n", p.pdl.c_str());
+        if (p.rawPort || p.ippPort || p.lpdPort)
+            out.printf("    portas : %s%s%s%s%s%s\n", p.rawPort ? "raw " : "", p.rawPort ? String(p.rawPort).c_str() : "",
+                       p.ippPort ? "  ipp " : "", p.ippPort ? (String(p.ippPort) + p.ippPath).c_str() : "",
+                       p.lpdPort ? "  lpd " : "", p.lpdPort ? (String(p.lpdPort) + (p.lpdQueue.length() ? "/" + p.lpdQueue : "")).c_str() : "");
         if (p.online) {
             out.printf("    estado : %s / %s%s%s\n", deviceStatusText(p.deviceStatus), printerStatusText(p.printerStatus),
                        p.errorState ? " - " : "", p.errorState ? errorStateText(p.errorState).c_str() : "");
@@ -582,6 +614,19 @@ void printList(Print& out) {
         }
     }
     out.println("---------------------------------------");
+}
+
+void fillTarget(const IPAddress& ip, PrintJob::Target& t) {
+    t = PrintJob::Target();
+    t.ip = ip;
+    int i = findByIp(ip);
+    if (i < 0) return;
+    const Printer& p = printers[i];
+    if (p.rawPort) { t.rawPort = p.rawPort; t.rawKnown = true; }
+    if (p.ippPort) { t.ippPort = p.ippPort; t.ippKnown = true; }
+    if (p.lpdPort) { t.lpdPort = p.lpdPort; t.lpdKnown = true; }
+    if (p.ippPath.length()) t.ippPath = p.ippPath;
+    if (p.lpdQueue.length()) t.lpdQueue = p.lpdQueue;
 }
 
 bool addManual(const String& ipText, String* err) {

@@ -91,9 +91,11 @@ void printStatusImpl() {
     {
         const PrintJob::Info& jb = PrintJob::info();
         if (jb.state == PrintJob::State::Idle) Serial.println("Trabalho      : nenhum");
-        else Serial.printf("Trabalho      : %s -> %s:%u  %s  %u bytes%s%s\n", jb.id.c_str(), jb.ip.toString().c_str(), jb.port,
+        else Serial.printf("Trabalho      : %s -> %s:%u (%s)  %s  %u bytes%s%s%s%s\n", jb.id.c_str(), jb.ip.toString().c_str(), jb.port,
+                           PrintJob::transportText(jb.transport),
                            PrintJob::busy() ? "em curso" : (jb.state == PrintJob::State::Done ? "concluido" : "erro"),
-                           (unsigned)jb.written, jb.error.length() ? " - " : "", jb.error.c_str());
+                           (unsigned)jb.written, jb.error.length() ? " - " : "", jb.error.c_str(),
+                           jb.detail.length() ? " - " : "", jb.detail.c_str());
     }
     Serial.println("----------------------------------------");
 }
@@ -346,7 +348,7 @@ void handleLine(String l) {
             IPAddress ip;
             if (!ip.fromString(l)) { Serial.println("IP invalido."); prompt("ip"); break; }
             pendingValue = l;
-            Serial.println("Formato: pcl (padrao), text ou ps (vazio = pcl)");
+            Serial.println("Formato: pcl, text, ps ou pdf (vazio = automatico: pdf via IPP, pcl via porta 9100)");
             state = State::AskTestFormat;
             prompt("formato");
             break;
@@ -354,12 +356,18 @@ void handleLine(String l) {
 
         case State::AskTestFormat: {
             IPAddress ip; ip.fromString(pendingValue);
-            String fmt = l.isEmpty() ? "pcl" : l;
+            PrintJob::Target t;
+            PrinterMonitor::fillTarget(ip, t);
+            String fmt = l.isEmpty() ? "auto" : l;
             String err;
-            if (PrintJob::printTest(ip, PrintJob::DEFAULT_PORT, fmt, "", "serial-test", &err))
-                Serial.printf("Pagina de teste (%s) enviada para %s:9100. Acompanhe pelo LED (ciano) e pela opcao 1.\n",
-                              fmt.c_str(), pendingValue.c_str());
-            else Serial.printf("Falha: %s.\n", err.c_str());
+            if (PrintJob::printTest(t, fmt, "", "serial-test", &err)) {
+                const PrintJob::Info& jb = PrintJob::info();
+                Serial.printf("Pagina de teste enviada para %s:%u via %s (%s). Acompanhe pelo LED (ciano) e pela opcao 1.\n",
+                              pendingValue.c_str(), jb.port, PrintJob::transportText(jb.transport), jb.name.c_str());
+            } else {
+                Serial.printf("Falha: %s%s%s.\n", err.c_str(), PrintJob::info().detail.length() ? " - " : "",
+                              PrintJob::info().detail.c_str());
+            }
             backToMenu();
             break;
         }

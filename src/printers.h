@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 #include "config.h"
+#include "printjob.h"
 
 // Fase 2: descoberta (mDNS) e monitoramento (SNMP) de impressoras na rede.
 //  - mDNS: _ipp._tcp, _printer._tcp, _pdl-datastream._tcp (consultas assincronas, uma por vez)
@@ -31,6 +32,11 @@ struct Printer {
     String location;      // TXT "note" / sysLocation
     String pdl;           // linguagens aceitas, separadas por virgula: PDF,PS,PCL,PCLXL,PJL,URF,PWG,TEXT...
                           // (TXT "pdl" do mDNS/IPP + prtInterpreterLangFamily via SNMP)
+    uint16_t ippPort = 0; // portas anunciadas via mDNS (0 = nao anunciada)
+    uint16_t rawPort = 0; //   _pdl-datastream (JetDirect)
+    uint16_t lpdPort = 0; //   _printer (LPD)
+    String ippPath;       // TXT "rp" do _ipp (ex.: "/ipp/print")
+    String lpdQueue;      // TXT "rp" do _printer (fila LPD, ex.: "lp", "PASSTHRU", "BINARY_P1")
     bool manual = false;  // adicionada manualmente (persistida)
     bool viaMdns = false; // anunciada via mDNS
     uint8_t snmpVersion = 1;  // 1 = v2c, 0 = v1 (fallback apos timeouts)
@@ -51,6 +57,7 @@ struct Printer {
     uint32_t lastOk = 0;
 
     bool hasAlert() const;
+    bool isOfflineKnown() const;   // offline confirmado (3 falhas seguidas), nao "ainda nao sondada"
 };
 
 void begin(DeviceConfig& cfg);
@@ -66,6 +73,9 @@ void printList(Print& out);
 const char* deviceStatusText(int v);
 const char* printerStatusText(int v);
 String errorStateText(uint16_t bits);  // lista separada por virgula (vazio = sem erros)
+
+// Destino de impressao para um IP: portas e caminho IPP anunciados (ou padroes 9100/631).
+void fillTarget(const IPAddress& ip, PrintJob::Target& t);
 
 // Acoes
 bool addManual(const String& ipText, String* err);

@@ -76,7 +76,7 @@ void StatusLed::loop() {
     for (uint8_t i = 0; i < n; i++) {
         const PrinterMonitor::Printer* p = PrinterMonitor::get(i);
         if (!p) continue;
-        if (!p->online) { if (p->everOnline || p->manual) offline = true; }
+        if (!p->online) { if (p->isOfflineKnown()) offline = true; }
         else if (p->hasAlert()) alert = true;
     }
     if (offline)      { if (blinkOn(500)) color(BRIGHT, 255, 0, 0); else color(4, 255, 0, 0); }  // vermelho piscando

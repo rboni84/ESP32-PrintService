@@ -10,7 +10,7 @@ O dispositivo fica na rede local, descobre e monitora impressoras por SNMP, e at
 - **Rede resiliente**: modo AP + STA. O AP desliga quando o WiFi estabiliza e volta se a conexão cair por 60 s.
 - **Descoberta de impressoras**: mDNS (`_ipp`, `_printer`, `_pdl-datastream`) e cadastro manual por IP, persistido.
 - **Monitoramento SNMP** (v2c com fallback para v1, cliente próprio, sem dependências): estado do dispositivo e da impressora, erros detectados (papel, toner, tampa, atolamento…), contador de páginas e níveis de suprimentos (toner, cilindro, resíduo).
-- **Serviço de impressão**: cliente WebSocket para o aplicativo externo, trabalhos em blocos com confirmação, entrega raw na porta 9100, página de teste em PCL, texto ou PostScript.
+- **Serviço de impressão**: cliente WebSocket para o aplicativo externo, trabalhos em blocos com confirmação, entrega em raw (porta 9100), IPP (porta 631, para impressoras domésticas e AirPrint) ou LPD (porta 515, modelos antigos), página de teste em PDF, PCL, texto ou PostScript.
 - **Portal web** com abas Status, Impressoras, Rede WiFi, Dispositivo e Sistema, e API REST local.
 - **LED RGB de status** e **botão BOOT** segurado por 5 s para reset de fábrica.
 
@@ -85,7 +85,7 @@ src/
   console.*        menu no terminal serial
   printers.*       descoberta mDNS e sondagem SNMP das impressoras
   snmp.*           cliente SNMP v1/v2c (GET/GETNEXT) nao bloqueante
-  printjob.*       envio raw para a porta 9100 e pagina de teste
+  printjob.*       entrega raw (9100), IPP (631) ou LPD (515) e pagina de teste (PDF/PCL/texto/PS)
   cloud.*          cliente WebSocket para o aplicativo externo
   status_led.*     LED WS2812 de status
   reset_button.*   botao BOOT: reset de fabrica

@@ -84,7 +84,7 @@ void sendHello() {
     d["buffer"] = PrintJob::BUFFER_SIZE;
     d["data_timeout"] = PrintJob::dataTimeout() / 1000;
     JsonArray caps = d["capabilities"].to<JsonArray>();
-    caps.add("raw9100"); caps.add("snmp"); caps.add("mdns"); caps.add("test_page"); caps.add("pdl");
+    caps.add("raw9100"); caps.add("ipp"); caps.add("lpd"); caps.add("snmp"); caps.add("mdns"); caps.add("test_page"); caps.add("pdl");
     // Ultimo trabalho originado do servidor: permite reconciliar a fila apos uma queda do link.
     const PrintJob::Info& lj = PrintJob::info();
     if ((lj.state == PrintJob::State::Done || lj.state == PrintJob::State::Error) && isCloudSource(lj.source)) {
@@ -142,8 +142,27 @@ void onJobDone(const PrintJob::Info& info) {
     d["job_id"] = info.id;
     d["bytes"] = info.written;
     d["duration_ms"] = info.finishedAt - info.startedAt;
+    d["transport"] = PrintJob::transportText(info.transport);
+    d["port"] = info.port;
+    if (info.detail.length()) d["detail"] = info.detail;
     if (info.state != PrintJob::State::Done) d["code"] = info.error;
     send(d);
+}
+
+// Monta o destino a partir do que o monitor sabe da impressora mais overrides da mensagem.
+void targetFromMessage(JsonDocument& doc, const IPAddress& ip, PrintJob::Target& t) {
+    PrinterMonitor::fillTarget(ip, t);
+    t.transport = PrintJob::parseTransport(String(doc["transport"] | "auto"));
+    uint16_t port = doc["port"] | 0;
+    if (port) {
+        if (t.transport == PrintJob::Transport::Ipp) t.ippPort = port;
+        else if (t.transport == PrintJob::Transport::Lpd) t.lpdPort = port;
+        else t.rawPort = port;
+    }
+    const char* path = doc["ipp_path"] | (const char*)nullptr;
+    if (path && *path) t.ippPath = path[0] == '/' ? String(path) : "/" + String(path);
+    const char* queue = doc["lpd_queue"] | (const char*)nullptr;
+    if (queue && *queue) t.lpdQueue = queue;
 }
 
 // ---------- mensagens recebidas ----------
@@ -198,12 +217,16 @@ void handleMessage(const uint8_t* payload, size_t len) {
         IPAddress ip;
         if (!parseIp(doc["printer"], ip)) { sendError("bad_printer", "IP invalido", jobId, "print_test"); return; }
         String id = jobId ? String(jobId) : "test-" + String(millis());
+        PrintJob::Target t;
+        targetFromMessage(doc, ip, t);
         String err;
-        if (!PrintJob::printTest(ip, doc["port"] | PrintJob::DEFAULT_PORT, String(doc["format"] | "pcl"), id, "cloud-test", &err)) {
-            sendError(err.c_str(), "pagina de teste nao iniciada", id.c_str(), "print_test");
+        if (!PrintJob::printTest(t, String(doc["format"] | "auto"), id, "cloud-test", &err)) {
+            sendError(err.c_str(), PrintJob::info().detail.c_str(), id.c_str(), "print_test");
             return;
         }
-        JsonDocument d; d["type"] = "job.ready"; d["job_id"] = id; d["test"] = true; send(d);
+        JsonDocument d; d["type"] = "job.ready"; d["job_id"] = id; d["test"] = true;
+        d["transport"] = PrintJob::transportText(PrintJob::info().transport); d["port"] = PrintJob::info().port;
+        send(d);
         return;
     }
 
@@ -211,15 +234,18 @@ void handleMessage(const uint8_t* payload, size_t len) {
         if (!jobId) { sendError("missing_job_id", "job_id obrigatorio"); return; }
         IPAddress ip;
         if (!parseIp(doc["printer"], ip)) { sendError("bad_printer", "IP invalido", jobId); return; }
+        PrintJob::Target t;
+        targetFromMessage(doc, ip, t);
         String err;
-        if (!PrintJob::start(jobId, ip, doc["port"] | PrintJob::DEFAULT_PORT, doc["size"] | 0,
-                             String(doc["name"] | ""), "cloud", &err)) {
-            sendError(err.c_str(), "trabalho nao iniciado", jobId);
+        if (!PrintJob::start(jobId, t, doc["size"] | 0, String(doc["name"] | ""), "cloud", String(doc["format"] | ""), &err)) {
+            sendError(err.c_str(), PrintJob::info().detail.length() ? PrintJob::info().detail.c_str() : "trabalho nao iniciado", jobId);
             return;
         }
         JsonDocument d;
         d["type"] = "job.ready"; d["job_id"] = jobId;
         d["chunk_max"] = PrintJob::CHUNK_MAX; d["buffer_free"] = PrintJob::freeSpace();
+        d["transport"] = PrintJob::transportText(PrintJob::info().transport); d["port"] = PrintJob::info().port;
+        if (PrintJob::info().docFormat.length()) d["format"] = PrintJob::info().docFormat;
         send(d);
         return;
     }
