@@ -1,6 +1,6 @@
 # Contrato de API: PrintService ⇄ aplicativo externo
 
-Protocolo **1**. Documento válido para o firmware **0.3.5**.
+Protocolo **1**. Documento válido para o firmware **0.3.6**.
 
 | Firmware | Mudanças no contrato |
 |---|---|
@@ -8,6 +8,7 @@ Protocolo **1**. Documento válido para o firmware **0.3.5**.
 | 0.3.1 | `pdl` por impressora, `last_job` no `hello`, `data_timeout` no `welcome`, código `link_lost` |
 | 0.3.2 | Transporte `ipp`, campos `ports` e `ipp_path`, formato `pdf` na página de teste, `detail` nos erros |
 | 0.3.3 | Transporte `lpd`, campos `lpd_queue`, ordem automática pelas portas anunciadas, `POST /api/print/test` assíncrono |
+| 0.3.6 | **Nome do dispositivo corrigido**: passa a usar os dois últimos bytes reais do MAC WiFi. No ESP32-C6 a leitura anterior devolvia o MAC em forma EUI-64 e chips do mesmo lote recebiam o mesmo nome (ex.: `PrintService-91FE`). Dispositivos já em uso mudam de nome, hostname, SSID do AP e `X-Device-Id`; a senha padrão do AP também muda quando nunca foi alterada. Atualize a URL do servidor externo em cada dispositivo. |
 | 0.3.5 | `job.ack` retido até o buffer ter espaço para outro bloco (contrapressão real; evita `overflow` com impressora lenta mesmo com o servidor aguardando cada ack); `device.restart` pelo WebSocket; capability `restart` no `hello`; `reply_to` nas respostas a `get_status`, `get_printers`, `get_job` e `get_discovery`; `ip` aceito como sinônimo de `printer` nos comandos; eco do `id` do comando em toda resposta direta; `get_discovery` durante a busca aguarda o término para responder |
 | 0.3.4 | Busca mDNS só sob demanda (`discover`, `discover.results`, `GET /api/discover`); nada entra na lista monitorada sem inclusão explícita; `refresh` passa a só resondar SNMP |
 

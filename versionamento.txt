@@ -8,7 +8,29 @@ EDICAO (codigo/config), DOC (documentacao/contrato), TESTE (resultado
 observado), PENDENTE (item aberto).
 
 ----------------------------------------------------------------
-0.3.5  (2026-09-23)  - em teste, nao commitado
+0.3.6  (2026-09-23)  - em teste, nao commitado
+----------------------------------------------------------------
+[2026-09-23] TESTE 12:16: status serial do 2o ESP: MAC 98:A3:16:91:19:84, nome
+    PrintService-91FE, igual ao 1o ESP. Confirmado o relato do usuario.
+[2026-09-23] EDICAO src/config.cpp: causa raiz do nome repetido. No ESP32-C6,
+    ESP.getEfuseMac() devolve o MAC em forma EUI-64 (8 bytes, FF:FE inserido
+    no meio: 98:A3:16:FF:FE:91:19:84); (mac >> 32) & 0xFFFF pegava FE (fixo)
+    + 91 (1o byte da parte unica), logo chips do mesmo lote davam o mesmo
+    sufixo. Agora le o MAC WiFi de 6 bytes com esp_read_mac(ESP_MAC_WIFI_STA)
+    e usa os 2 ultimos bytes (98:A3:16:91:19:84 -> PrintService-1984). A
+    senha padrao do AP passa a usar os 6 bytes reais (antes so 1 byte variava
+    entre chips do lote).
+    IMPACTO: dispositivos ja em uso mudam de nome/hostname/SSID do AP/
+    X-Device-Id e, se nunca alteraram a senha do AP, de senha padrao. A URL
+    do servidor externo (que carrega o nome no caminho) precisa ser refeita
+    em cada ESP.
+[2026-09-23] DOC docs/api-contract.md: versao 0.3.6 e changelog.
+[2026-09-23] EDICAO platformio.ini: FW_VERSION 0.3.5 -> 0.3.6.
+[2026-09-23] TESTE ~12:25: compilacao 0.3.6 OK. Nao gravado ainda: a troca de
+    nome exige refazer a URL do servidor externo em cada ESP.
+
+----------------------------------------------------------------
+0.3.5  (2026-09-23)  - testado em hardware, nao commitado
 ----------------------------------------------------------------
 [2026-09-23] EDICAO src/cloud.cpp: job.ack retido ate o buffer ter espaco para
     outro bloco inteiro (buffer_free >= chunk_max). Causa do erro "overflow"
@@ -99,6 +121,15 @@ Testes com o dispositivo real (COM11, ESP em 192.168.9.99, SSID DISPAFILM IOT):
 [2026-09-23] PENDENTE decisao: nome amigavel enviado no printer.add ("name")
     fica so no servidor ou o ESP passa a armazenar/devolver.
 [2026-09-23] PENDENTE: commit das alteracoes 0.3.5.
+[2026-09-23] TESTE ~12:10: usuario relatou que um ESP novo apresentou o mesmo
+    MAC do anterior. Novo chip apareceu em COM12 (o anterior era COM11), porta
+    ocupada por outro monitor, leitura direta nao foi possivel;
+    PrintService-91FE.local nao resolveu na rede. Nome do dispositivo vem de
+    ESP.getEfuseMac() (2 ultimos bytes) em src/config.cpp e nao e editavel,
+    entao repetir sufixo entre chips e improvavel. Hipotese: a URL do
+    servidor externo configurada no novo ESP carrega o nome do antigo
+    (/ws/devices/1/PrintService-91FE) e o backend mostra a identidade
+    guardada desse device. A verificar com o MAC lido no serial (opcao 1).
 
 ----------------------------------------------------------------
 0.3.4  (2026-09-22)
