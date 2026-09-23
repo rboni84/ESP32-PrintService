@@ -3,6 +3,7 @@
 #include "printers.h"
 #include "printjob.h"
 #include "cloud.h"
+#include "ssid_util.h"
 
 #include <WiFi.h>
 
@@ -63,7 +64,7 @@ void printStatusImpl() {
     Serial.printf("MAC           : %s\n", WiFi.macAddress().c_str());
     Serial.printf("Uptime        : %lus   Heap livre: %u bytes\n", millis() / 1000, ESP.getFreeHeap());
     Serial.println("-- Rede WiFi (STA)");
-    Serial.printf("SSID          : %s\n", g_cfg->hasWifi() ? g_cfg->wifiSsid.c_str() : "(nao configurado)");
+    Serial.printf("SSID          : %s\n", g_cfg->hasWifi() ? SsidUtil::display(g_cfg->wifiSsid).c_str() : "(nao configurado)");
     Serial.printf("Estado        : %s\n", sta ? "conectado" : (g_cfg->hasWifi() ? "desconectado" : "-"));
     if (sta) {
         Serial.printf("IP            : %s\n", WiFi.localIP().toString().c_str());
@@ -128,7 +129,12 @@ void printMenuImpl() {
 void startScan() {
     Serial.println("Buscando redes (aguarde)...");
     WiFi.scanDelete();
-    WiFi.scanNetworks(true /*async*/, false /*hidden*/);
+    if (Portal::wifiScanStart() == WIFI_SCAN_FAILED) {
+        Serial.println("Falha ao iniciar a busca de redes.");
+        Portal::wifiScanFinish();
+        backToMenu();
+        return;
+    }
     state = State::Scanning;
 }
 
@@ -140,11 +146,11 @@ void pollScan() {
     } else {
         Serial.printf("%d rede(s) encontrada(s):\n", n);
         for (int i = 0; i < n; i++) {
-            Serial.printf("  %2d) %-32s %4d dBm  ch%-2d %s\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+            Serial.printf("  %2d) %-32s %4d dBm  ch%-2d %s\n", i + 1, SsidUtil::display(WiFi.SSID(i)).c_str(), WiFi.RSSI(i),
                           WiFi.channel(i), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "aberta" : "protegida");
         }
     }
-    WiFi.scanDelete();
+    Portal::wifiScanFinish();
     backToMenu();
 }
 
@@ -263,7 +269,7 @@ void handleLine(String l) {
 
         case State::AskSsid:
             if (l.isEmpty()) { Serial.println("Cancelado."); backToMenu(); break; }
-            if (l.length() > 32) { Serial.println("SSID muito longo (max 32)."); prompt("ssid"); break; }
+            if (SsidUtil::charCount(l) > 32 || l.length() > 64) { Serial.println("SSID muito longo (max 32)."); prompt("ssid"); break; }
             pendingSsid = l;
             Serial.println("Senha da rede (vazio = rede aberta)");
             state = State::AskWifiPass;
@@ -277,7 +283,7 @@ void handleLine(String l) {
             g_cfg->wifiSsid = pendingSsid;
             g_cfg->wifiPass = l;
             Config::save(*g_cfg);
-            Serial.printf("WiFi salvo: '%s'. Reiniciando para conectar...\n", pendingSsid.c_str());
+            Serial.printf("WiFi salvo: '%s'. Reiniciando para conectar...\n", SsidUtil::display(pendingSsid).c_str());
             hideEcho = false;
             state = State::Menu;
             Portal::scheduleRestart();

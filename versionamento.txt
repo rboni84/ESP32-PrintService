@@ -8,6 +8,58 @@ EDICAO (codigo/config), DOC (documentacao/contrato), TESTE (resultado
 observado), PENDENTE (item aberto).
 
 ----------------------------------------------------------------
+0.3.7  (2026-09-23)  - em teste, nao commitado
+----------------------------------------------------------------
+[2026-09-23] TESTE ~16:10 (serial COM12): ESP com SSID 'ADM DESCARTAVEIS' (A com
+    acento) salvo em UTF-8 (bytes C3 81) nao conecta: NO_AP_FOUND a cada
+    2,8 s (autoReconnect do core). Menu serial opcao 5 durante o laco:
+    "Falha ao buscar redes" (esp_wifi_scan_start recusa com STA conectando).
+    Usuario confirmou os dois sintomas.
+[2026-09-23] EDICAO src/ssid_util.h (novo): conversao Latin-1 <-> UTF-8,
+    validacao UTF-8, contagem de caracteres, display() e sameName().
+    Causa raiz: 802.11 nao define codificacao do SSID; o roteador anuncia o
+    acento em Latin-1 (1 byte, C1) e o navegador/terminal enviam UTF-8
+    (2 bytes); o radio compara byte a byte.
+[2026-09-23] EDICAO src/portal.cpp: resolveSsid() - com SSID fora do ASCII,
+    scan sincrono antes do WiFi.begin (boot e reconexao) e uso dos bytes
+    exatos da rede de mesmo nome (log "[STA] rede ... anunciada em Latin-1").
+    /api/scan e /api/status devolvem o SSID convertido para UTF-8 (antes o
+    navegador mostrava U+FFFD e, escolhido na lista, salvava EF BF BD).
+    Limite do SSID passa a 32 caracteres (nao bytes).
+[2026-09-23] EDICAO src/portal.cpp, portal.h, console.cpp: Portal::
+    wifiScanStart()/wifiScanFinish(). Se o scan nao inicia com STA
+    desconectado, desliga autoReconnect + WiFi.disconnect() e tenta de novo;
+    Portal::loop nao reconecta enquanto o scan esta pendente e retoma o
+    WiFi.begin ao consumir o resultado (ou apos 30 s sem leitura). Console
+    (opcao 5) e /api/scan usam as duas funcoes.
+[2026-09-23] DOC src/web_docs.h: nota em /api/scan.
+[2026-09-23] EDICAO platformio.ini: FW_VERSION 0.3.6 -> 0.3.7.
+[2026-09-23] TESTE ~16:40 (1a gravacao 0.3.7): busca de redes pelo console com
+    STA desconectado passou a funcionar ("[STA] reconexao pausada para
+    buscar redes", 11 redes, STA retomado em seguida). Conexao continuou em
+    NO_AP_FOUND e o resolvedor nao logou nada: a rede no ar nao batia nem
+    byte a byte nem como Latin-1.
+[2026-09-23] EDICAO src/ssid_util.h: stripTrailingSpace() (espaco e NBSP no
+    fim) e hex(). src/portal.cpp resolveSsid(): 2a passada tolerante a
+    espacos finais no nome anunciado; sem correspondencia, loga em hex o
+    SSID salvo e ate 5 nomes fora do ASCII vistos no ar; ao casar, loga os
+    bytes usados.
+[2026-09-23] TESTE ~16:50 (2a gravacao 0.3.7): CAUSA RAIZ REAL - o roteador
+    anuncia "ADM DESCARTAVEIS " com ESPACO NO FIM (18 bytes, UTF-8:
+    ... C3 81 56 45 49 53 20); o handleWifiSave aplica trim() e salvou sem
+    o espaco (17 bytes). Nao era Latin-1 (a conversao fica como defesa).
+    Log: "[STA] rede 'ADM DESCARTAVEIS' anunciada como 41 44 4D ... 53 20
+    (UTF-8); usando os bytes do roteador" e "[STA] conectado.
+    IP=192.201.0.154 RSSI=-55". Status pelo console: conectado, gateway
+    192.201.0.1, portal http://192.201.0.154/. Reboot pela opcao 6
+    reconecta em ~4 s (scan de resolucao incluso). AP de configuracao segue
+    ativo ate 2 min de STA estavel.
+PENDENTE: o SSID salvo continua sem o espaco final (trim); funciona porque
+    resolveSsid() recupera os bytes no scan a cada conexao (rede oculta com
+    espaco final nao seria encontrada). Avaliar guardar os bytes resolvidos
+    na NVS.
+
+----------------------------------------------------------------
 0.3.6  (2026-09-23)  - em teste, nao commitado
 ----------------------------------------------------------------
 [2026-09-23] TESTE 12:16: status serial do 2o ESP: MAC 98:A3:16:91:19:84, nome
@@ -28,6 +80,9 @@ observado), PENDENTE (item aberto).
 [2026-09-23] EDICAO platformio.ini: FW_VERSION 0.3.5 -> 0.3.6.
 [2026-09-23] TESTE ~12:25: compilacao 0.3.6 OK. Nao gravado ainda: a troca de
     nome exige refazer a URL do servidor externo em cada ESP.
+[2026-09-23] TESTE ~12:35: usuario fez reset de fabrica pelo botao BOOT (5 s)
+    e reportou "tudo ok". NVS limpa (config e impressoras), senha do AP volta
+    a padrao derivada do MAC.
 
 ----------------------------------------------------------------
 0.3.5  (2026-09-23)  - testado em hardware, nao commitado

@@ -2,6 +2,7 @@
 #include "web_pages.h"
 #include "web_docs.h"
 #include "json_util.h"
+#include "ssid_util.h"
 #include "printers.h"
 #include "printjob.h"
 #include "cloud.h"
@@ -30,6 +31,16 @@ unsigned long staLostSince = 0;        // millis() em que STA caiu (0 = ok)
 unsigned long lastReconnectTry = 0;
 unsigned long restartAt = 0;           // agendamento de reboot (0 = nenhum)
 bool doFactoryReset = false;
+String staSsidInUse;                   // bytes de SSID passados ao WiFi.begin (ver resolveSsid)
+
+// Busca de redes com o STA desconectado: o autoReconnect do core religa logo apos cada
+// NO_AP_FOUND e o esp_wifi_scan_start devolve ESP_ERR_WIFI_STATE enquanto "conectando".
+// Para o scan iniciar, a reconexao fica pausada ate wifiScanFinish() (ou por seguranca
+// SCAN_PAUSE_MAX_MS, caso o navegador feche sem ler o resultado).
+volatile bool scanPausedSta = false;
+volatile bool staResumePending = false;
+unsigned long scanPausedAt = 0;
+const unsigned long SCAN_PAUSE_MAX_MS = 30 * 1000;
 
 const unsigned long AP_SHUTDOWN_AFTER_STA_MS = 2 * 60 * 1000;  // desliga AP 2 min apos STA estavel
 const unsigned long AP_RESTORE_AFTER_LOST_MS = 60 * 1000;      // religa AP 60 s sem STA
@@ -107,12 +118,58 @@ void stopAP() {
     Serial.println("[AP] desligado (STA estavel)");
 }
 
+// Bytes de SSID a usar no WiFi.begin. O portal e o console guardam o nome em UTF-8, mas muitos
+// roteadores anunciam acentos em Latin-1 (1 byte por caractere) e o radio compara byte a byte:
+// 'ADM DESCARTAVEIS' com A acentuado em UTF-8 (C3 81) dava NO_AP_FOUND numa rede anunciada com C1.
+// Com caracteres fora do ASCII faz um scan sincrono (~2-3 s, so com o STA parado) e usa os bytes
+// exatos da rede de mesmo nome; sem rede visivel, usa o que esta salvo.
+String resolveSsid() {
+    const String& cfgSsid = g_cfg->wifiSsid;
+    if (SsidUtil::isAscii(cfgSsid)) return cfgSsid;
+    int16_t n = WiFi.scanNetworks(false /*sync*/, false /*hidden*/);
+    if (n < 0) { delay(150); n = WiFi.scanNetworks(false, false); }
+    String found;
+    for (int i = 0; i < n; i++) {
+        String s = WiFi.SSID(i);
+        if (s == cfgSsid) { found = s; break; }                       // igual byte a byte
+        if (found.isEmpty() && SsidUtil::sameName(cfgSsid, s)) found = s;
+    }
+    // 2a passada tolerante a espacos no fim do nome anunciado (o portal aplica trim ao digitado)
+    if (found.isEmpty()) {
+        for (int i = 0; i < n; i++) {
+            String s = WiFi.SSID(i);
+            if (SsidUtil::sameName(cfgSsid, SsidUtil::stripTrailingSpace(s))) { found = s; break; }
+        }
+    }
+    if (found.isEmpty() && n > 0) {
+        // Diagnostico: mostra os bytes dos nomes fora do ASCII vistos no ar
+        Serial.printf("[STA] nenhuma rede com o nome '%s' entre %d encontradas. Salvo: %s\n",
+                      SsidUtil::display(cfgSsid).c_str(), n, SsidUtil::hex(cfgSsid).c_str());
+        int shown = 0;
+        for (int i = 0; i < n && shown < 5; i++) {
+            String s = WiFi.SSID(i);
+            if (SsidUtil::isAscii(s)) continue;
+            Serial.printf("[STA]   no ar: '%s' = %s\n", SsidUtil::display(s).c_str(), SsidUtil::hex(s).c_str());
+            shown++;
+        }
+    }
+    WiFi.scanDelete();
+    if (n < 0) Serial.println("[STA] scan para resolver o SSID falhou; usando o SSID salvo");
+    if (found.isEmpty()) return cfgSsid;
+    if (found != cfgSsid)
+        Serial.printf("[STA] rede '%s' anunciada como %s (%s); usando os bytes do roteador\n",
+                      SsidUtil::display(cfgSsid).c_str(), SsidUtil::hex(found).c_str(),
+                      SsidUtil::isValidUtf8(found) ? "UTF-8" : "Latin-1");
+    return found;
+}
+
 void startSTA() {
     if (!g_cfg->hasWifi()) return;
+    staSsidInUse = resolveSsid();
     WiFi.setAutoReconnect(true);
-    WiFi.begin(g_cfg->wifiSsid.c_str(), g_cfg->wifiPass.c_str());
+    WiFi.begin(staSsidInUse.c_str(), g_cfg->wifiPass.c_str());
     lastReconnectTry = millis();
-    Serial.printf("[STA] conectando a '%s'...\n", g_cfg->wifiSsid.c_str());
+    Serial.printf("[STA] conectando a '%s'...\n", SsidUtil::display(g_cfg->wifiSsid).c_str());
 }
 
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -159,7 +216,7 @@ void handleStatus(AsyncWebServerRequest* req) {
     String j = "{";
     j += "\"fw\":\"" FW_VERSION "\",";
     j += "\"devname\":\"" + jsonEscape(g_cfg->deviceName) + "\",";
-    j += "\"ssid\":\"" + jsonEscape(g_cfg->wifiSsid) + "\",";
+    j += "\"ssid\":\"" + jsonEscape(SsidUtil::display(g_cfg->wifiSsid)) + "\",";
     j += "\"sta_connected\":" + String(sta ? "true" : "false") + ",";
     j += "\"sta_ip\":\"" + (sta ? WiFi.localIP().toString() : String("")) + "\",";
     j += "\"rssi\":" + String(sta ? WiFi.RSSI() : 0) + ",";
@@ -189,11 +246,13 @@ void handleScan(AsyncWebServerRequest* req) {
     if (n == WIFI_SCAN_RUNNING) { sendJson(req, 200, "{\"status\":\"scanning\"}"); return; }
     if (n == WIFI_SCAN_FAILED || req->hasParam("refresh")) {
         WiFi.scanDelete();
-        WiFi.scanNetworks(true /*async*/, false /*hidden*/);
+        Portal::wifiScanStart();   // se falhar, a proxima chamada (scanComplete = FAILED) tenta de novo
         sendJson(req, 200, "{\"status\":\"scanning\"}");
         return;
     }
-    // resultado pronto: monta lista sem SSIDs duplicados, ordenada por RSSI (scan ja ordena)
+    // resultado pronto: monta lista sem SSIDs duplicados, ordenada por RSSI (scan ja ordena).
+    // SSID sai como texto UTF-8 exibivel; um nome anunciado em Latin-1 e convertido para o
+    // navegador nao mostrar U+FFFD. Na conexao, resolveSsid() recupera os bytes do roteador.
     String j = "{\"status\":\"done\",\"networks\":[";
     bool first = true;
     for (int i = 0; i < n; i++) {
@@ -204,12 +263,12 @@ void handleScan(AsyncWebServerRequest* req) {
         if (dup) continue;
         if (!first) j += ",";
         first = false;
-        j += "{\"ssid\":\"" + jsonEscape(ssid) + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
+        j += "{\"ssid\":\"" + jsonEscape(SsidUtil::display(ssid)) + "\",\"rssi\":" + String(WiFi.RSSI(i)) +
              ",\"ch\":" + String(WiFi.channel(i)) +
              ",\"secure\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
     }
     j += "]}";
-    WiFi.scanDelete();  // proximo GET dispara novo scan
+    Portal::wifiScanFinish();  // descarta o resultado (proximo GET dispara novo scan) e retoma o STA
     sendJson(req, 200, j);
 }
 
@@ -219,13 +278,15 @@ void handleWifiSave(AsyncWebServerRequest* req) {
     String ssid = req->getParam("ssid", true)->value();
     String pass = req->hasParam("pass", true) ? req->getParam("pass", true)->value() : "";
     ssid.trim();
-    if (ssid.isEmpty() || ssid.length() > 32) { sendError(req, 400, "SSID invalido"); return; }
+    // Limite de 32 caracteres (nao bytes): em UTF-8 um acento ocupa 2 bytes, mas o roteador pode
+    // anunciar em Latin-1 (1 byte); os bytes reais sao resolvidos na conexao.
+    if (ssid.isEmpty() || SsidUtil::charCount(ssid) > 32 || ssid.length() > 64) { sendError(req, 400, "SSID invalido"); return; }
     if (pass.length() > 0 && pass.length() < 8) { sendError(req, 400, "Senha WiFi deve ter ao menos 8 caracteres"); return; }
 
     g_cfg->wifiSsid = ssid;
     g_cfg->wifiPass = pass;
     Config::save(*g_cfg);
-    Serial.printf("[CFG] WiFi salvo: '%s'. Reiniciando...\n", ssid.c_str());
+    Serial.printf("[CFG] WiFi salvo: '%s'. Reiniciando...\n", SsidUtil::display(ssid).c_str());
     sendJson(req, 200, "{\"ok\":true,\"restart\":true}");
     scheduleRestart();
 }
@@ -540,12 +601,41 @@ void Portal::loop() {
     } else {
         if (!staLostSince) staLostSince = now;
         if (!apActive && now - staLostSince > AP_RESTORE_AFTER_LOST_MS) startAP();
-        if (now - lastReconnectTry > RECONNECT_INTERVAL_MS) {
-            lastReconnectTry = now;
+        if (scanPausedSta) {
+            // scan iniciado pelo portal e nunca lido (navegador fechou): nao deixa o STA parado
+            if (now - scanPausedAt > SCAN_PAUSE_MAX_MS) {
+                Serial.println("[STA] resultado do scan nao lido; retomando conexao");
+                Portal::wifiScanFinish();
+            }
+        } else if (staResumePending || now - lastReconnectTry > RECONNECT_INTERVAL_MS) {
+            staResumePending = false;
             Serial.println("[STA] tentando reconectar...");
             WiFi.disconnect();
-            WiFi.begin(g_cfg->wifiSsid.c_str(), g_cfg->wifiPass.c_str());
+            startSTA();   // resolve o SSID de novo (a rede pode ter voltado com outros bytes)
         }
+    }
+}
+
+int16_t Portal::wifiScanStart() {
+    int16_t r = WiFi.scanNetworks(true /*async*/, false /*hidden*/);
+    if (r == WIFI_SCAN_FAILED && g_cfg->hasWifi() && WiFi.status() != WL_CONNECTED && !scanPausedSta) {
+        // STA em laco de reconexao: para a tentativa em curso e desliga o autoReconnect do core
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect();
+        scanPausedSta = true;
+        scanPausedAt = millis();
+        delay(100);
+        r = WiFi.scanNetworks(true, false);
+        Serial.printf("[STA] reconexao pausada para buscar redes%s\n", r == WIFI_SCAN_FAILED ? " (scan ainda nao iniciou)" : "");
+    }
+    return r;
+}
+
+void Portal::wifiScanFinish() {
+    WiFi.scanDelete();
+    if (scanPausedSta) {
+        scanPausedSta = false;
+        staResumePending = true;   // Portal::loop refaz o WiFi.begin (fora da task do servidor web)
     }
 }
 
