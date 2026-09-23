@@ -1,5 +1,6 @@
 #include "portal.h"
 #include "web_pages.h"
+#include "web_docs.h"
 #include "json_util.h"
 #include "printers.h"
 #include "printjob.h"
@@ -272,6 +273,21 @@ void setupRoutes() {
         r->addHeader("Cache-Control", "no-store");
         req->send(r);
     });
+    // Documentacao da API servida pelo dispositivo (a rota especifica vem antes de /docs)
+    server.on("/docs/openapi.json", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        String j = FPSTR(DOCS_OPENAPI);
+        j.replace("FWVER", FW_VERSION);
+        AsyncWebServerResponse* r = req->beginResponse(200, "application/json", j);
+        r->addHeader("Cache-Control", "no-store");
+        req->send(r);
+    });
+    server.on("/docs", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        AsyncWebServerResponse* r = req->beginResponse(200, "text/html", PAGE_DOCS);
+        r->addHeader("Cache-Control", "no-store");
+        req->send(r);
+    });
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/scan", HTTP_GET, handleScan);
     server.on("/api/wifi", HTTP_POST, handleWifiSave);
@@ -297,6 +313,25 @@ void setupRoutes() {
         String j;
         j.reserve(2048);
         PrinterMonitor::toJson(j);
+        sendJson(req, 200, j);
+    });
+    // busca mDNS sob demanda (modal "Incluir impressora")
+    server.on("/api/discover/start", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        String err;
+        if (!PrinterMonitor::startDiscovery(&err)) { sendError(req, 409, err.c_str()); return; }
+        sendJson(req, 202, "{\"ok\":true,\"running\":true}");
+    });
+    server.on("/api/discover/clear", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        PrinterMonitor::clearDiscovery();
+        sendJson(req, 200, "{\"ok\":true}");
+    });
+    server.on("/api/discover", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!checkAuth(req)) return;
+        String j;
+        j.reserve(1024);
+        PrinterMonitor::discoveryJson(j);
         sendJson(req, 200, j);
     });
     server.on("/api/printers", HTTP_POST, [](AsyncWebServerRequest* req) {

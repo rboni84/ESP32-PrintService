@@ -1,6 +1,6 @@
 # Contrato de API: PrintService ⇄ aplicativo externo
 
-Protocolo **1**. Documento válido para o firmware **0.3.3**.
+Protocolo **1**. Documento válido para o firmware **0.3.5**.
 
 | Firmware | Mudanças no contrato |
 |---|---|
@@ -8,10 +8,12 @@ Protocolo **1**. Documento válido para o firmware **0.3.3**.
 | 0.3.1 | `pdl` por impressora, `last_job` no `hello`, `data_timeout` no `welcome`, código `link_lost` |
 | 0.3.2 | Transporte `ipp`, campos `ports` e `ipp_path`, formato `pdf` na página de teste, `detail` nos erros |
 | 0.3.3 | Transporte `lpd`, campos `lpd_queue`, ordem automática pelas portas anunciadas, `POST /api/print/test` assíncrono |
+| 0.3.5 | `job.ack` retido até o buffer ter espaço para outro bloco (contrapressão real; evita `overflow` com impressora lenta mesmo com o servidor aguardando cada ack); `device.restart` pelo WebSocket; capability `restart` no `hello` |
+| 0.3.4 | Busca mDNS só sob demanda (`discover`, `discover.results`, `GET /api/discover`); nada entra na lista monitorada sem inclusão explícita; `refresh` passa a só resondar SNMP |
 
 O PrintService é um dispositivo ESP32-C6 instalado na rede local das impressoras. Ele:
 
-1. descobre impressoras (mDNS) e as monitora por SNMP;
+1. monitora por SNMP as impressoras que o operador ou o aplicativo incluíram, e busca impressoras na rede (mDNS) quando solicitado;
 2. mantém uma conexão WebSocket **de saída** com o aplicativo, pela qual envia status e a lista de impressoras;
 3. recebe trabalhos de impressão pelo WebSocket e os entrega à impressora por raw (9100), IPP (631) ou LPD (515);
 4. imprime uma página de teste gerada localmente.
@@ -87,7 +89,7 @@ Frames binários geram `error` com `code: "binary_unsupported"`. O maior frame a
   "device": "PrintService-3A7F", "mac": "AA:BB:CC:DD:3A:7F",
   "fw": "0.3.3", "ip": "192.168.0.23", "hostname": "PrintService-3A7F.local",
   "chunk_max": 8192, "buffer": 32768, "data_timeout": 20,
-  "capabilities": ["raw9100", "ipp", "lpd", "snmp", "mdns", "test_page", "pdl"],
+  "capabilities": ["raw9100", "ipp", "lpd", "snmp", "mdns", "test_page", "pdl", "restart"],
   "last_job": {"job_id": "7f3a", "state": "error", "bytes": 16384, "code": "link_lost", "reported": false},
   "ts": 12345
 }
@@ -134,7 +136,7 @@ Com `printing: true` vem também `job_id`.
 
 | Campo | Significado |
 |---|---|
-| `manual` / `mdns` | Origem: cadastrada por IP / anunciada via mDNS (podem ser ambos) |
+| `manual` / `mdns` | Toda impressora monitorada foi incluída explicitamente (`manual: true`). `mdns: true` indica que a inclusão partiu de um resultado da busca, com nome e portas vindos do anúncio |
 | `online` | Respondeu SNMP na última sondagem |
 | `alert` | Offline confirmado (3 sondagens seguidas sem resposta), `dev_status` 3 ou 5, algum erro, toner ≤ 10 % ou resíduo ≥ 90 % |
 | `dev_status` | hrDeviceStatus: 1 desconhecido, 2 operando, 3 alerta, 4 teste, 5 parada |
@@ -153,6 +155,25 @@ Com `printing: true` vem também `job_id`.
 
 **Escolha de formato e transporte pelo servidor.** O dispositivo não converte conteúdo. Use `pdl` para decidir o formato: com `PDF` na lista, envie o PDF; sem `PDF`, converta antes do `job.start` (Ghostscript: `-sDEVICE=pxlmono` ou `pxlcolor` para PCL-XL, `ljet4` para PCL5, `ps2write` para PostScript). Use `ports` para decidir o transporte, ou deixe `auto`. Lista `pdl` vazia: tente PDF e confirme com uma página de teste.
 
+#### `discover.results`, ao fim de uma busca pedida por `discover` ou em resposta a `get_discovery`
+
+```json
+{
+  "type": "discover.results", "ts": 12345,
+  "data": {
+    "running": false, "count": 2,
+    "found": [
+      {"ip": "192.168.1.120", "name": "EPSON L6270 Series", "host": "EPSON431EC2", "model": "EPSON L6270 Series",
+       "ports": {"raw": 9100, "ipp": 631, "lpd": 515}, "ipp_path": "/ipp/print", "lpd_queue": "PASSTHRU", "added": false},
+      {"ip": "192.168.1.50", "name": "HP LaserJet Pro M404", "host": "NPI3A7F2C", "model": "",
+       "ports": {"raw": 9100, "ipp": 631, "lpd": null}, "ipp_path": "/ipp/print", "lpd_queue": "", "added": true}
+    ]
+  }
+}
+```
+
+A lista é leve por desenho: só nome, host, modelo (TXT `ty`), portas e caminhos anunciados, até 32 dispositivos. Ela **não** é monitorada; `added` indica se o IP já está na lista monitorada. Os resultados são liberados 5 min após a busca ou quando o operador fecha o modal no portal. Impressoras em outra VLAN não aparecem, porque multicast raramente cruza VLANs; inclua-as por IP com `printer.add`.
+
 #### Respostas a trabalhos: `job.ready`, `job.ack`, `job.done`, `job.error`, `job.status`
 
 Descritas na seção 2.5.
@@ -170,12 +191,15 @@ Descritas na seção 2.5.
 | `get_status` | — | Responde `status`. |
 | `get_printers` | — | Responde `printers`. |
 | `get_job` | — | Responde `job.status` com `data` igual ao objeto de `GET /api/print/status`. |
-| `refresh` | — | Força descoberta mDNS e sondagem SNMP. Responde `ack`. |
-| `printer.add` | `printer` (IP) | Cadastra impressora manual. Responde `ack`, ou `error` com `code` `IP invalido`, `ja cadastrada` ou `limite de impressoras atingido`. |
+| `refresh` | — | Força sondagem SNMP imediata de todas as impressoras cadastradas. Responde `ack`. |
+| `discover` | — | Inicia a busca mDNS (cerca de 9 s). Responde `ack` e, ao terminar, envia `discover.results`. `error` com `code` `sem rede WiFi`, `busca em andamento` ou `mDNS indisponivel`. |
+| `get_discovery` | — | Responde `discover.results` com a lista atual (pode estar vazia ou em andamento). |
+| `printer.add` | `printer` (IP) | Inclui a impressora na lista monitorada e persiste. Se o IP estiver na última busca, aproveita nome e portas anunciadas. Responde `ack`, ou `error` com `code` `IP invalido`, `ja cadastrada` ou `limite de impressoras atingido`. |
 | `printer.remove` | `printer` (IP) | Remove. Responde `ack` ou `error` (`not_found`). |
+| `device.restart` | opcional `force` | Reinicia o dispositivo em 1,5 s. Responde `ack` (com `delay_ms`) e o WebSocket cai; o `hello` seguinte marca a volta. Com trabalho em curso responde `error` (`busy`), salvo `force: true`, que cancela o trabalho (`job.error` com `code` `restart`) antes de reiniciar. Não há reset de fábrica remoto. |
 | `print_test` | `printer`; opcionais `transport`, `port`, `ipp_path`, `lpd_queue`, `format` (`auto`, `pdf`, `pcl`, `text`, `ps`), `job_id` | Imprime a página de teste (seção 2.6). Responde `job.ready` com `test: true`, depois `job.done` ou `job.error`. |
 | `job.start` | `job_id`, `printer`; opcionais `transport`, `port`, `ipp_path`, `lpd_queue`, `format` (MIME, para IPP), `size` (obrigatório para LPD), `name` | Conecta à impressora. Responde `job.ready` ou `job.error`. |
-| `job.chunk` | `job_id`, `seq`, `data` (base64), `last` | Entrega um bloco. Responde `job.ack`. |
+| `job.chunk` | `job_id`, `seq`, `data` (base64), `last` | Entrega um bloco. Responde `job.ack` assim que houver espaço para outro bloco inteiro (pode demorar com impressora lenta). |
 | `job.cancel` | `job_id` | Aborta e fecha a conexão com a impressora. Resulta em `job.error` com `code: "canceled"`. |
 
 Tipo desconhecido recebe `error` com `code: "unknown_type"`.
@@ -224,7 +248,7 @@ Os cabeçalhos de protocolo (HTTP+IPP ou handshake LPD) são enviados no primeir
 
 Regras de controle de fluxo:
 
-1. **Aguarde `job.ack` antes do próximo `job.chunk`.** O buffer tem 32 KB; enviar sem esperar pode gerar `overflow` e cancelar o trabalho.
+1. **Aguarde `job.ack` antes do próximo `job.chunk`.** O buffer tem 32 KB. O `job.ack` só é enviado quando o buffer volta a ter espaço para um bloco inteiro (`buffer_free` ≥ `chunk_max`); com a impressora lenta, o ack pode demorar até que ela consuma dados. Isso é a contrapressão do protocolo: quem espera o ack nunca recebe `overflow`. Enviar sem esperar pode gerar `overflow` e cancelar o trabalho. Enquanto o ack está retido, o relógio de `data_timeout` não corre contra o servidor, porque há dados no buffer; só `write_timeout` (impressora parada 20 s) encerra o trabalho.
 2. Cada bloco tem no máximo `chunk_max` bytes **binários** (8192). Maiores geram `chunk_too_large` e cancelam.
 3. `seq` começa em 0 e volta no `job.ack`. O dispositivo não reordena.
 4. O último bloco leva `last: true`. `data` vazio com `last: true` é válido para encerrar.
@@ -269,11 +293,12 @@ Regras de controle de fluxo:
 | `no_such_job` | `job.chunk` ou `job.cancel` para `job_id` que não está ativo |
 | `chunk_too_large` | Bloco decodificado maior que 8192 bytes |
 | `bad_base64` | `data` inválido |
-| `overflow` | Buffer cheio: o servidor não aguardou `job.ack` |
+| `overflow` | Buffer cheio: o servidor enviou `job.chunk` sem aguardar o `job.ack` anterior (o ack só sai quando cabe outro bloco) |
 | `data_timeout` | Sem novos blocos pelo tempo configurado |
 | `write_timeout` | 20 s sem a impressora consumir dados |
 | `connection_closed` | Impressora fechou a conexão antes do fim |
 | `canceled` | `job.cancel` recebido |
+| `restart` | `device.restart` com `force: true` durante o trabalho |
 | `link_lost` | WebSocket caiu durante o trabalho; o dispositivo abortou. Relatado só em `last_job` no próximo `hello` |
 
 Após `job.done` ou `job.error` o dispositivo está livre para o próximo `job.start`.
@@ -311,13 +336,18 @@ Impressoras reportadas pelo dispositivo pertencem a ele para fins de entrega: re
 
 Base `http://<ip-do-dispositivo>/` ou `http://PrintService-XXXX.local/`. Com senha de portal, HTTP Basic com usuário `admin`. Corpo de `POST` em `application/x-www-form-urlencoded`, salvo indicação.
 
+O dispositivo também serve esta referência em `GET /docs` (HTML) e a descrição OpenAPI 3.0 em `GET /docs/openapi.json`.
+
 | Método e rota | Parâmetros | Resposta |
 |---|---|---|
 | `GET /api/status` | — | Rede, AP, contadores de impressoras, `printing`, objeto `cloud` (igual a `GET /api/cloud`) |
 | `GET /api/printers` | — | Mesmo objeto de `printers.data` (seção 2.3) |
-| `POST /api/printers` | `ip` | `{"ok":true}` ou 400 `{"error"}` |
+| `POST /api/printers` | `ip` | Inclui e persiste (aproveita a busca se o IP estiver nela). `{"ok":true}` ou 400 `{"error"}` |
 | `POST /api/printers/remove` | `ip` | `{"ok":true}` ou 404 |
-| `POST /api/printers/refresh` | — | `{"ok":true}` |
+| `POST /api/printers/refresh` | — | Sondagem SNMP imediata de todas. `{"ok":true}` |
+| `POST /api/discover/start` | — | Inicia a busca mDNS. 202 `{"ok":true,"running":true}`; 409 se sem rede ou já em curso |
+| `GET /api/discover` | — | Mesmo objeto de `discover.results.data` |
+| `POST /api/discover/clear` | — | Libera a lista de resultados |
 | `GET /api/cloud` | — | `{"enabled","url","token_set","state","connected","last_error","connected_for","reconnects"}` |
 | `POST /api/cloud` | `url` (vazio = desativar), `token` (vazio = manter, espaço = remover) | Objeto de `GET /api/cloud` com o novo estado |
 | `GET /api/print/status` | — | `{"state","busy","buffer_free","chunk_max","job":{"id","name","source","printer","port","transport","format","queue","expected","received","written","error","detail","duration_ms"}}`. `state`: `idle`, `connecting`, `streaming`, `finishing`, `done`, `error` |
@@ -358,7 +388,7 @@ Durante um trabalho o LED do dispositivo pisca em ciano (ver `status-led.md`).
 
 1. Aceitar a conexão WebSocket, validar `Authorization: Bearer` contra o tenant do caminho e conferir `X-Device-Id`.
 2. Ler `last_job` do `hello`; com `reported: false`, fechar o job na fila como erro. Responder `welcome`, ajustando `data_timeout` se a geração de conteúdo for lenta.
-3. Persistir `status` e `printers`, incluindo `pdl`, `ports`, `ipp_path` e `lpd_queue`. Considerar o dispositivo offline após 3 intervalos sem `status`. Registrar as impressoras como pertencentes ao dispositivo.
+3. Persistir `status` e `printers`, incluindo `pdl`, `ports`, `ipp_path` e `lpd_queue`. Considerar o dispositivo offline após 3 intervalos sem `status`. Registrar as impressoras como pertencentes ao dispositivo. Para cadastrar impressoras a partir do aplicativo, use `discover` e depois `printer.add` com o IP escolhido; a busca sozinha não inclui nada.
 4. Para imprimir: gerar o documento inteiro; escolher formato pelo `pdl` e transporte pelas `ports`, ou deixar `auto`; enviar `job.start` com `size`; enviar blocos de até 8 KB em base64, um por vez, aguardando `job.ack`; encerrar com `last: true`; tratar `job.done` e `job.error`.
 5. Não enviar `job.start` enquanto outro trabalho do mesmo dispositivo não terminar.
 6. Ler a fila do banco periodicamente para o dispositivo conectado, não da memória.

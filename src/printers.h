@@ -4,16 +4,30 @@
 #include "config.h"
 #include "printjob.h"
 
-// Fase 2: descoberta (mDNS) e monitoramento (SNMP) de impressoras na rede.
-//  - mDNS: _ipp._tcp, _printer._tcp, _pdl-datastream._tcp (consultas assincronas, uma por vez)
+// Fase 2: monitoramento (SNMP) das impressoras cadastradas e busca (mDNS) sob demanda.
+//  - lista monitorada: apenas impressoras incluidas pelo operador (portal, serial, WebSocket),
+//    persistidas em NVS por IP. Nada entra nela automaticamente.
+//  - busca mDNS: so quando solicitada (modal "Incluir impressora", opcao 'f', comando WS).
+//    Produz uma lista leve (nome, IP, portas anunciadas) de ate MAX_FOUND resultados, liberada
+//    ao fechar o modal ou apos FOUND_TTL; economiza heap em relacao a descoberta continua.
 //  - SNMP: HOST-RESOURCES-MIB (hrDeviceStatus, hrPrinterStatus, hrPrinterDetectedErrorState)
-//          e Printer-MIB (prtMarkerLifeCount, prtMarkerSuppliesTable) via GET/GETNEXT, um
-//          dispositivo por vez, sem bloquear o loop.
-//  - impressoras adicionadas manualmente (por IP) sao persistidas em NVS.
+//          e Printer-MIB (prtMarkerLifeCount, prtMarkerSuppliesTable, prtInterpreterTable) via
+//          GET/GETNEXT, um dispositivo por vez, sem bloquear o loop.
 namespace PrinterMonitor {
 
 const uint8_t MAX_PRINTERS = 16;
 const uint8_t MAX_SUPPLIES = 8;
+const uint8_t MAX_FOUND = 32;
+
+// Resultado leve da busca mDNS (nao e monitorado ate ser incluido).
+struct Found {
+    IPAddress ip;
+    String name;      // instancia mDNS (ex.: "EPSON L6270 Series")
+    String host;      // hostname
+    String model;     // TXT "ty"
+    uint16_t rawPort = 0, ippPort = 0, lpdPort = 0;   // portas anunciadas (0 = nao)
+    String ippPath, lpdQueue;                          // TXT "rp" de _ipp e _printer
+};
 
 struct Supply {
     String desc;          // prtMarkerSuppliesDescription
@@ -37,8 +51,8 @@ struct Printer {
     uint16_t lpdPort = 0; //   _printer (LPD)
     String ippPath;       // TXT "rp" do _ipp (ex.: "/ipp/print")
     String lpdQueue;      // TXT "rp" do _printer (fila LPD, ex.: "lp", "PASSTHRU", "BINARY_P1")
-    bool manual = false;  // adicionada manualmente (persistida)
-    bool viaMdns = false; // anunciada via mDNS
+    bool manual = false;  // incluida pelo operador (persistida); hoje toda impressora monitorada e manual
+    bool viaMdns = false; // incluida a partir da busca mDNS (portas/nome vieram do anuncio)
     uint8_t snmpVersion = 1;  // 1 = v2c, 0 = v1 (fallback apos timeouts)
 
     bool online = false;      // respondeu SNMP na ultima sondagem
@@ -52,7 +66,6 @@ struct Printer {
     Supply supplies[MAX_SUPPLIES];
     uint8_t supplyCount = 0;
 
-    uint32_t lastSeenMdns = 0;  // millis()
     uint32_t lastPoll = 0;
     uint32_t lastOk = 0;
 
@@ -77,8 +90,17 @@ String errorStateText(uint16_t bits);  // lista separada por virgula (vazio = se
 // Destino de impressao para um IP: portas e caminho IPP anunciados (ou padroes 9100/631).
 void fillTarget(const IPAddress& ip, PrintJob::Target& t);
 
+// Busca mDNS sob demanda (~9 s: tres servicos, 3 s cada)
+bool startDiscovery(String* err);   // false se sem rede, mDNS indisponivel ou busca ja em curso
+bool isDiscovering();
+uint8_t foundCount();
+const Found* foundAt(uint8_t i);
+void discoveryJson(String& out);    // {"running","count","found":[{ip,name,host,model,ports,ipp_path,lpd_queue}]}
+void printFound(Print& out);
+void clearDiscovery();              // libera a lista de resultados
+
 // Acoes
-bool addManual(const String& ipText, String* err);
+bool addManual(const String& ipText, String* err);   // usa portas/nome da busca, se o IP estiver nela
 bool remove(const String& ipText);
-void refreshNow();  // forca nova descoberta e sondagem de todas
+void refreshNow();  // forca sondagem SNMP imediata de todas (nao dispara busca mDNS)
 }  // namespace PrinterMonitor

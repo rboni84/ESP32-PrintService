@@ -18,11 +18,10 @@ uint8_t nPrinters = 0;
 const char* NS = "printsrv";
 const char* KEY_PRINTERS = "printers";
 
-const uint32_t DISCOVERY_INTERVAL_MS = 120 * 1000;  // ciclo completo de descoberta mDNS
-const uint32_t DISCOVERY_QUERY_MS = 3000;           // duracao de cada consulta PTR
+const uint32_t DISCOVERY_QUERY_MS = 3000;           // duracao de cada consulta PTR (3 servicos)
+const uint32_t FOUND_TTL_MS = 5 * 60 * 1000;        // libera resultados da busca apos 5 min
 const uint32_t POLL_INTERVAL_MS = 30 * 1000;        // sondagem SNMP por impressora
 const uint32_t SNMP_TIMEOUT_MS = 2000;
-const uint32_t MDNS_EXPIRE_MS = 60UL * 60 * 1000;   // remove mDNS-only offline sem anuncio ha 1 h
 const uint16_t SNMP_PORT = 161;
 
 // ---------- OIDs ----------
@@ -112,14 +111,16 @@ void addPdlFromMime(String& list, const String& mimes) {
     }
 }
 
-// ---------- estado da descoberta mDNS ----------
+// ---------- estado da busca mDNS (sob demanda) ----------
 struct ServiceType { const char* service; const char* proto; };
 const ServiceType SERVICES[] = { {"_ipp", "_tcp"}, {"_printer", "_tcp"}, {"_pdl-datastream", "_tcp"} };
 const uint8_t N_SERVICES = sizeof(SERVICES) / sizeof(SERVICES[0]);
 mdns_search_once_t* search = nullptr;
 uint8_t serviceIdx = 0;
-uint32_t lastDiscovery = 0;
-bool discoveryPending = true;  // dispara logo apos o STA conectar
+bool discovering = false;
+uint32_t discoveryDoneAt = 0;   // millis() do fim da ultima busca (0 = lista vazia/limpa)
+Found found[MAX_FOUND];
+uint8_t nFound = 0;
 
 // ---------- persistencia ----------
 
@@ -171,16 +172,33 @@ void loadManual() {
     }
 }
 
-// ---------- descoberta mDNS ----------
+// ---------- busca mDNS (sob demanda) ----------
+
+void clearFound() {
+    for (uint8_t i = 0; i < nFound; i++) found[i] = Found();   // libera as Strings
+    nFound = 0;
+    discoveryDoneAt = 0;
+}
+
+int foundIndex(const IPAddress& ip) {
+    for (uint8_t i = 0; i < nFound; i++) if (found[i].ip == ip) return i;
+    return -1;
+}
+
+void finishDiscovery() {
+    if (search) { mdns_query_async_delete(search); search = nullptr; }
+    discovering = false;
+    serviceIdx = 0;
+    discoveryDoneAt = millis();
+    Serial.printf("[PRN] busca mDNS concluida: %u dispositivo(s)\n", nFound);
+}
 
 void startDiscoveryQuery() {
-    if (search) return;
     const ServiceType& st = SERVICES[serviceIdx];
-    search = mdns_query_async_new(nullptr, st.service, st.proto, MDNS_TYPE_PTR, DISCOVERY_QUERY_MS, 20, nullptr);
+    search = mdns_query_async_new(nullptr, st.service, st.proto, MDNS_TYPE_PTR, DISCOVERY_QUERY_MS, MAX_FOUND, nullptr);
     if (!search) {
-        // mDNS ainda nao inicializado (Portal inicia ao obter IP): tenta no proximo ciclo
-        discoveryPending = true;
-        lastDiscovery = millis();
+        Serial.println("[PRN] busca mDNS indisponivel (mDNS nao iniciado)");
+        finishDiscovery();
     }
 }
 
@@ -193,83 +211,61 @@ String txtValue(const mdns_result_t* r, const char* key) {
     return String();
 }
 
+// Preenche a lista leve. Guarda so o necessario para exibir e para escolher o transporte depois.
 void handleDiscoveryResults(mdns_result_t* results) {
-    uint32_t now = millis();
     for (mdns_result_t* r = results; r; r = r->next) {
         IPAddress ip;
-        bool found = false;
+        bool hasIp = false;
         for (mdns_ip_addr_t* a = r->addr; a; a = a->next) {
-            if (a->addr.type == ESP_IPADDR_TYPE_V4) { ip = IPAddress(a->addr.u_addr.ip4.addr); found = true; break; }
+            if (a->addr.type == ESP_IPADDR_TYPE_V4) { ip = IPAddress(a->addr.u_addr.ip4.addr); hasIp = true; break; }
         }
-        if (!found) continue;
-        Printer* pr = addPrinter(ip);
-        if (!pr) continue;
-        bool isNew = !pr->viaMdns && !pr->manual;
-        pr->viaMdns = true;
-        pr->lastSeenMdns = now;
+        if (!hasIp) continue;
+        int i = foundIndex(ip);
+        if (i < 0) {
+            if (nFound >= MAX_FOUND) continue;
+            i = nFound++;
+            found[i] = Found();
+            found[i].ip = ip;
+        }
+        Found& f = found[i];
         if (r->port) {
             switch (serviceIdx) {   // ordem de SERVICES[]
                 case 0: {
-                    pr->ippPort = r->port;
+                    f.ippPort = r->port;
                     String rp = txtValue(r, "rp");
-                    if (rp.length()) pr->ippPath = rp.startsWith("/") ? rp : "/" + rp;
+                    if (rp.length()) f.ippPath = rp.startsWith("/") ? rp : "/" + rp;
                     break;
                 }
                 case 1: {
-                    pr->lpdPort = r->port;
+                    f.lpdPort = r->port;
                     String rp = txtValue(r, "rp");
-                    if (rp.length()) pr->lpdQueue = rp;
+                    if (rp.length()) f.lpdQueue = rp;
                     break;
                 }
-                case 2: pr->rawPort = r->port; break;
+                case 2: f.rawPort = r->port; break;
             }
         }
-        if (r->hostname && pr->host.isEmpty()) pr->host = r->hostname;
-        if (r->instance_name && pr->name.isEmpty()) pr->name = r->instance_name;
-        String ty = txtValue(r, "ty");
-        if (ty.length()) pr->model = ty;
-        else { String prod = txtValue(r, "product"); if (prod.length() && pr->model.isEmpty()) pr->model = prod; }
-        String note = txtValue(r, "note");
-        if (note.length()) pr->location = note;
-        String pdl = txtValue(r, "pdl");
-        if (pdl.length()) addPdlFromMime(pr->pdl, pdl);
-        if (isNew) Serial.printf("[PRN] descoberta via mDNS: %s (%s) %s\n", ip.toString().c_str(),
-                                 pr->host.c_str(), pr->model.c_str());
+        if (r->hostname && f.host.isEmpty()) f.host = r->hostname;
+        if (r->instance_name && f.name.isEmpty()) f.name = r->instance_name;
+        if (f.model.isEmpty()) { String ty = txtValue(r, "ty"); if (ty.length()) f.model = ty; }
     }
 }
 
 void pollDiscovery(uint32_t now) {
-    if (search) {
-        mdns_result_t* results = nullptr;
-        uint8_t num = 0;
-        if (mdns_query_async_get_results(search, 0, &results, &num)) {
-            if (results) { handleDiscoveryResults(results); mdns_query_results_free(results); }
-            mdns_query_async_delete(search);
-            search = nullptr;
-            serviceIdx++;
-            if (serviceIdx >= N_SERVICES) { serviceIdx = 0; lastDiscovery = now; discoveryPending = false; }
-            else startDiscoveryQuery();
-        }
+    if (!discovering) {
+        if (nFound && discoveryDoneAt && now - discoveryDoneAt > FOUND_TTL_MS) clearFound();
         return;
     }
-    if (discoveryPending || now - lastDiscovery > DISCOVERY_INTERVAL_MS) {
-        discoveryPending = false;
-        serviceIdx = 0;
-        startDiscoveryQuery();
-    }
-}
-
-void expireStale(uint32_t now) {
-    for (uint8_t i = 0; i < nPrinters;) {
-        Printer& pr = printers[i];
-        bool stale = !pr.manual && pr.viaMdns && !pr.online && now - pr.lastSeenMdns > MDNS_EXPIRE_MS;
-        if (stale && (int8_t)i != pollIdx) {
-            Serial.printf("[PRN] removida (sem anuncio mDNS e offline): %s\n", pr.ip.toString().c_str());
-            for (uint8_t k = i; k + 1 < nPrinters; k++) printers[k] = printers[k + 1];
-            nPrinters--;
-            if (pollIdx > (int8_t)i) pollIdx--;
-        } else i++;
-    }
+    if (!search) return;
+    mdns_result_t* results = nullptr;
+    uint8_t num = 0;
+    if (!mdns_query_async_get_results(search, 0, &results, &num)) return;
+    if (results) { handleDiscoveryResults(results); mdns_query_results_free(results); }
+    mdns_query_async_delete(search);
+    search = nullptr;
+    serviceIdx++;
+    if (serviceIdx >= N_SERVICES) finishDiscovery();
+    else startDiscoveryQuery();
 }
 
 // ---------- sondagem SNMP ----------
@@ -481,23 +477,70 @@ bool Printer::hasAlert() const {
 void begin(DeviceConfig& cfg) {
     g_cfg = &cfg;
     loadManual();
-    Serial.printf("[PRN] monitor iniciado: %u impressora(s) manual(is); community='%s'\n", nPrinters,
+    Serial.printf("[PRN] monitor iniciado: %u impressora(s) cadastrada(s); community='%s'\n", nPrinters,
                   cfg.snmpCommunity.c_str());
 }
 
 void loop() {
     uint32_t now = millis();
     if (!Portal::isStaConnected()) {
-        // sem rede: aborta consultas em andamento e reagenda descoberta para quando conectar
+        // sem rede: aborta sondagem e busca em andamento
         if (stage != PollStage::Idle) { snmp.cancel(); stage = PollStage::Idle; pollIdx = -1; }
-        if (search) { mdns_query_async_delete(search); search = nullptr; serviceIdx = 0; }
-        discoveryPending = true;
+        if (discovering) finishDiscovery();
         return;
     }
     pollDiscovery(now);
     pollSnmp(now);
-    static uint32_t lastExpire = 0;
-    if (now - lastExpire > 60000) { lastExpire = now; expireStale(now); }
+}
+
+// ---------- busca mDNS: API ----------
+
+bool startDiscovery(String* err) {
+    if (!Portal::isStaConnected()) { if (err) *err = "sem rede WiFi"; return false; }
+    if (discovering) { if (err) *err = "busca em andamento"; return false; }
+    clearFound();
+    discovering = true;
+    serviceIdx = 0;
+    Serial.println("[PRN] busca mDNS iniciada");
+    startDiscoveryQuery();
+    if (!discovering) { if (err) *err = "mDNS indisponivel"; return false; }
+    return true;
+}
+
+bool isDiscovering() { return discovering; }
+uint8_t foundCount() { return nFound; }
+const Found* foundAt(uint8_t i) { return i < nFound ? &found[i] : nullptr; }
+void clearDiscovery() { if (!discovering) clearFound(); }
+
+void discoveryJson(String& j) {
+    j += "{\"running\":" + String(discovering ? "true" : "false") + ",\"count\":" + String(nFound) + ",\"found\":[";
+    for (uint8_t i = 0; i < nFound; i++) {
+        const Found& f = found[i];
+        if (i) j += ",";
+        j += "{\"ip\":\"" + f.ip.toString() + "\",\"name\":\"" + jsonEscape(f.name) + "\",\"host\":\"" + jsonEscape(f.host) +
+             "\",\"model\":\"" + jsonEscape(f.model) + "\"";
+        j += ",\"ports\":{\"raw\":" + String(f.rawPort ? String(f.rawPort) : String("null")) +
+             ",\"ipp\":" + String(f.ippPort ? String(f.ippPort) : String("null")) +
+             ",\"lpd\":" + String(f.lpdPort ? String(f.lpdPort) : String("null")) + "}";
+        j += ",\"ipp_path\":\"" + jsonEscape(f.ippPath) + "\",\"lpd_queue\":\"" + jsonEscape(f.lpdQueue) + "\"";
+        j += ",\"added\":" + String(findByIp(f.ip) >= 0 ? "true" : "false") + "}";
+    }
+    j += "]}";
+}
+
+void printFound(Print& out) {
+    out.println();
+    out.printf("-------- BUSCA mDNS: %u dispositivo(s) --------\n", nFound);
+    for (uint8_t i = 0; i < nFound; i++) {
+        const Found& f = found[i];
+        out.printf("%2d) %-15s %s%s\n", i + 1, f.ip.toString().c_str(), f.name.length() ? f.name.c_str() : f.host.c_str(),
+                   findByIp(f.ip) >= 0 ? "  [ja incluida]" : "");
+        if (f.model.length() && f.model != f.name) out.printf("    modelo : %s\n", f.model.c_str());
+        out.printf("    portas :%s%s%s%s\n", f.rawPort ? " raw" : "", f.ippPort ? " ipp" : "", f.lpdPort ? " lpd" : "",
+                   (f.rawPort || f.ippPort || f.lpdPort) ? "" : " (nenhuma anunciada)");
+    }
+    if (!nFound) out.println("(nenhuma impressora anunciada via mDNS; inclua por IP com a opcao 'a')");
+    out.println("-----------------------------------------------");
 }
 
 uint8_t count() { return nPrinters; }
@@ -639,6 +682,16 @@ bool addManual(const String& ipText, String* err) {
     if (!pr) { if (err) *err = "limite de impressoras atingido"; return false; }
     pr->manual = true;
     pr->lastPoll = 0;  // sonda em seguida
+    int f = foundIndex(ip);
+    if (f >= 0) {   // veio da busca: aproveita nome e portas anunciadas
+        const Found& d = found[f];
+        pr->viaMdns = true;
+        if (pr->name.isEmpty()) pr->name = d.name;
+        if (pr->host.isEmpty()) pr->host = d.host;
+        if (pr->model.isEmpty()) pr->model = d.model;
+        pr->rawPort = d.rawPort; pr->ippPort = d.ippPort; pr->lpdPort = d.lpdPort;
+        pr->ippPath = d.ippPath; pr->lpdQueue = d.lpdQueue;
+    }
     saveManual();
     Serial.printf("[PRN] adicionada manualmente: %s\n", ip.toString().c_str());
     return true;
@@ -661,7 +714,6 @@ bool remove(const String& ipText) {
 }
 
 void refreshNow() {
-    discoveryPending = true;
     for (uint8_t i = 0; i < nPrinters; i++) printers[i].lastPoll = 0;
 }
 

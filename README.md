@@ -8,7 +8,7 @@ O dispositivo fica na rede local, descobre e monitora impressoras por SNMP, e at
 
 - **Configuração sem software**: AP de configuração com captive portal (`http://192.168.4.1/`) e menu no terminal serial (`menu` + Enter). Nome do dispositivo (`PrintService-XXXX`) e senha padrão do AP derivados do MAC; a senha aparece no serial.
 - **Rede resiliente**: modo AP + STA. O AP desliga quando o WiFi estabiliza e volta se a conexão cair por 60 s.
-- **Descoberta de impressoras**: mDNS (`_ipp`, `_printer`, `_pdl-datastream`) e cadastro manual por IP, persistido.
+- **Cadastro de impressoras**: busca mDNS sob demanda (`_ipp`, `_printer`, `_pdl-datastream`) no modal "Incluir impressora", ou por IP. Só as incluídas são monitoradas e persistidas; a busca não roda em segundo plano, para economizar memória.
 - **Monitoramento SNMP** (v2c com fallback para v1, cliente próprio, sem dependências): estado do dispositivo e da impressora, erros detectados (papel, toner, tampa, atolamento…), contador de páginas e níveis de suprimentos (toner, cilindro, resíduo).
 - **Serviço de impressão**: cliente WebSocket para o aplicativo externo, trabalhos em blocos com confirmação, entrega em raw (porta 9100), IPP (porta 631, para impressoras domésticas e AirPrint) ou LPD (porta 515, modelos antigos), página de teste em PDF, PCL, texto ou PostScript.
 - **Portal web** com abas Status, Impressoras, Rede WiFi, Dispositivo e Sistema, e API REST local.
@@ -37,7 +37,7 @@ Os pinos podem ser alterados em `platformio.ini` (`PIN_STATUS_LED`, `PIN_RESET_B
 1. Grave o firmware e abra o monitor serial. O boot mostra o SSID e a senha do AP.
 2. Conecte-se ao AP `PrintService-XXXX`. O captive portal abre; se não abrir, acesse `http://192.168.4.1/`.
 3. Na aba **Rede WiFi**, escolha a rede e salve. O dispositivo reinicia e conecta.
-4. Acesse `http://PrintService-XXXX.local/` (ou o IP mostrado no serial). As impressoras que anunciam mDNS aparecem na aba **Impressoras**; as demais podem ser adicionadas por IP.
+4. Acesse `http://PrintService-XXXX.local/` (ou o IP mostrado no serial). Na aba **Impressoras**, clique em **Incluir impressora**: busque na rede por mDNS e adicione as desejadas, ou informe o IP.
 5. Para integrar ao aplicativo externo, informe URL WebSocket e token na aba **Dispositivo**.
 
 Tudo isso também pode ser feito pelo menu serial.
@@ -50,11 +50,12 @@ Base `http://<ip>/`, autenticação HTTP Basic (usuário `admin`) quando houver 
 |---|---|
 | `GET /api/status` | Estado geral, rede, contadores, estado do servidor externo |
 | `GET /api/printers` | Lista de impressoras com status e suprimentos |
-| `POST /api/printers` · `POST /api/printers/remove` · `POST /api/printers/refresh` | Cadastro manual e atualização |
+| `POST /api/printers` · `POST /api/printers/remove` · `POST /api/printers/refresh` | Inclusão, remoção e sondagem imediata |
+| `POST /api/discover/start` · `GET /api/discover` · `POST /api/discover/clear` | Busca mDNS sob demanda |
 | `GET|POST /api/cloud` | Estado e configuração do servidor externo |
 | `GET /api/print/status` · `POST /api/print/test` · `POST /api/print/cancel` · `POST /api/print` | Impressão e página de teste |
 
-Detalhes em [docs/api-contract.md](docs/api-contract.md).
+Detalhes em [docs/api-contract.md](docs/api-contract.md). O próprio dispositivo serve a referência da API em `http://PrintService-XXXX.local/docs` e uma descrição OpenAPI 3.0 em `/docs/openapi.json`, utilizável em Swagger UI ou Postman.
 
 ## Compilação
 

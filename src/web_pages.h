@@ -31,7 +31,7 @@ button:disabled{opacity:.6;cursor:default}
 #msg{display:none;padding:10px 12px;border-radius:8px;margin-bottom:12px}
 #msg.ok{display:block;background:#e6f4ea;color:#1a7f37}#msg.err{display:block;background:#fde8ec;color:#c8102e}
 .tab{display:none}.tab.on{display:block}
-.lnk{color:var(--acc);font-size:14px}
+.lnk{color:var(--acc);font-size:14px}.ext{color:var(--acc);font-size:14px;flex:0 0 auto}
 .prn{border-left:4px solid var(--muted)}.prn.ok{border-left-color:var(--ok)}.prn.warn{border-left-color:var(--warn)}.prn.err{border-left-color:var(--err)}
 .prn h2{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 .prn h2 .badge{font-size:13px;font-weight:700;letter-spacing:.5px;padding:4px 12px;color:#fff}
@@ -49,6 +49,10 @@ button:disabled{opacity:.6;cursor:default}
 .prog.ok i{background:var(--ok)}.prog.err i{background:var(--err)}
 #m-log{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:10px 0}
 .mbox .row{justify-content:flex-end}.mbox .row>*{flex:0 0 auto}
+.mbox form.row{justify-content:flex-start}.mbox form.row>input{flex:1 1 auto}
+.dlist{margin:8px 0 4px;max-height:280px;overflow:auto}
+.ditem{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;margin-bottom:6px}
+.ditem b{display:block;font-size:14px}.ditem small{color:var(--muted);font-size:12px}.ditem button{margin:0;padding:6px 10px;font-size:13px}
 </style></head><body>
 <header><h1>PrintService <small id="fw"></small></h1><small id="devname">Servidor de impressoras</small></header>
 <nav><a href="#status" class="on" data-t="status">Status</a><a href="#printers" data-t="printers">Impressoras</a><a href="#wifi" data-t="wifi">Rede WiFi</a><a href="#device" data-t="device">Dispositivo</a><a href="#system" data-t="system">Sistema</a></nav>
@@ -72,9 +76,9 @@ button:disabled{opacity:.6;cursor:default}
 
 <section class="tab" id="t-printers">
 <div id="prn-list"><div class="card"><p class="hint">Carregando…</p></div></div>
-<div class="card"><h2>Adicionar impressora por IP</h2>
-<form id="f-prn" class="row"><input name="ip" id="p-ip" placeholder="192.168.0.50" pattern="\d{1,3}(\.\d{1,3}){3}" required style="flex:2"><button type="submit" style="margin-top:0;flex:0 0 auto">Adicionar</button><button type="button" class="sec" id="b-prn-refresh" style="margin-top:0;flex:0 0 auto">Atualizar agora</button></form>
-<p class="hint">Impressoras que anunciam IPP/LPD/JetDirect via mDNS aparecem sozinhas. As demais podem ser cadastradas por IP (SNMP porta 161, community configurável na aba Dispositivo).</p>
+<div class="card"><h2>Cadastro</h2>
+<div class="row"><button id="b-prn-add" style="margin-top:0">Incluir impressora</button><button type="button" class="sec" id="b-prn-refresh" style="margin-top:0">Atualizar agora</button></div>
+<p class="hint">Só as impressoras incluídas são monitoradas (SNMP porta 161, community configurável na aba Dispositivo). A busca na rede por mDNS roda apenas sob demanda, dentro de "Incluir impressora", para economizar memória do dispositivo.</p>
 </div>
 <div class="card"><h2>Impressão</h2>
 <div class="row">
@@ -122,6 +126,10 @@ button:disabled{opacity:.6;cursor:default}
 <button class="danger" id="b-reset">Restaurar padrões</button>
 </div>
 <p class="hint">Restaurar padrões apaga WiFi, senhas, community SNMP e impressoras cadastradas, e reinicia em modo AP. O mesmo efeito é obtido segurando o botão BOOT da placa por 5 segundos.</p>
+</div>
+<div class="card"><h2>Documentação da API</h2>
+<p class="hint">Referência da API REST local e resumo do protocolo WebSocket, servidas pelo próprio dispositivo.</p>
+<div class="row"><a class="ext" href="/docs" target="_blank">Abrir /docs</a><a class="ext" href="/docs/openapi.json" target="_blank">openapi.json</a></div>
 </div></section>
 </main>
 <div id="modal" class="modal"><div class="mbox">
@@ -130,6 +138,15 @@ button:disabled{opacity:.6;cursor:default}
 <div class="prog" id="m-prog"><i id="m-bar"></i></div><div class="hint" id="m-bytes"></div>
 <div id="m-log"></div>
 <div class="row"><button class="sec" id="m-cancel">Cancelar</button><button id="m-close">Fechar</button></div>
+</div></div>
+<div id="dmodal" class="modal"><div class="mbox">
+<h2>Incluir impressora</h2>
+<div class="mrow"><button id="d-scan" style="margin:0">Buscar na rede (mDNS)</button><span id="d-status"></span></div>
+<div id="d-list" class="dlist"></div>
+<label>Ou informe o IP</label>
+<form id="f-prn" class="row"><input name="ip" id="p-ip" placeholder="192.168.0.50" pattern="\d{1,3}(\.\d{1,3}){3}" required style="flex:2"><button type="submit" style="margin-top:0;flex:0 0 auto">Adicionar</button></form>
+<p class="hint">A busca leva cerca de 9 s e lista até 32 dispositivos que anunciam IPP, LPD ou JetDirect. Impressoras em outra VLAN não aparecem; inclua por IP.</p>
+<div class="row"><button class="sec" id="d-close">Fechar</button></div>
 </div></div>
 <script>
 const $=s=>document.querySelector(s);
@@ -148,7 +165,7 @@ $('#s-mac').textContent=j.mac;$('#s-up').textContent=fmtUp(j.uptime);$('#s-heap'
 $('#d-name').textContent=j.devname;$('#d-mac').textContent=j.mac;$('#d-mdns').textContent=j.devname+'.local';
 if(j.cloud){const c=j.cloud;$('#c-state').innerHTML=c.enabled?('<span class="badge '+(c.connected?'ok':(c.last_error?'err':'warn'))+'">'+c.state+'</span>'+(c.connected?' há '+c.connected_for+' s':'')+(c.last_error?' · '+esc(c.last_error):'')+(c.token_set?'':' · <b>sem token</b>')):'desativado';if(!$('#c-url').value&&document.activeElement!==$('#c-url'))$('#c-url').value=c.url||''}if(!$('#w-ssid').value)$('#w-ssid').value=j.ssid||'';
 if(!$('#d-community').value)$('#d-community').value=j.community||'';
-$('#s-prn').textContent=j.sta_connected?(j.printers?j.printers+' impressora(s): '+j.printers_online+' online, '+j.printers_alert+' com alerta':'Nenhuma impressora encontrada ainda.'):'Monitoramento inativo: conecte o dispositivo a uma rede WiFi.';
+$('#s-prn').textContent=j.sta_connected?(j.printers?j.printers+' impressora(s): '+j.printers_online+' online, '+j.printers_alert+' com alerta':'Nenhuma impressora cadastrada.'):'Monitoramento inativo: conecte o dispositivo a uma rede WiFi.';
 }catch(e){}}
 status();setInterval(status,5000);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -156,11 +173,11 @@ const supName={3:'Toner',4:'Toner residual',5:'Tinta',6:'Cartucho de tinta',8:'R
 function supHtml(s){const p=s.pct;let cls='',txt;if(p<0){txt=s.level===-3?'ok':'n/d'}else{txt=p+'%'+(s['class']===4?' cheio':'');if(s['class']===4){cls=p>=90?'err':p>=75?'warn':''}else{cls=p<=5?'err':p<=15?'warn':''}}
 const bar=p<0?'':'<div class="bar '+cls+'"><i style="width:'+p+'%"></i></div>';return '<span>'+esc(s.desc||supName[s.type]||'Suprimento')+'</span><b>'+txt+'</b>'+bar}
 async function printers(){try{const r=await fetch('/api/printers');const j=await r.json();const el=$('#prn-list');
-if(!j.printers.length){el.innerHTML='<div class="card"><h2>Impressoras</h2><p class="hint">'+(j.sta?'Nenhuma impressora encontrada. A descoberta mDNS roda a cada 2 minutos; você também pode adicionar por IP abaixo.':'Conecte o dispositivo a uma rede WiFi para iniciar o monitoramento.')+'</p></div>';return}
+if(!j.printers.length){el.innerHTML='<div class="card"><h2>Impressoras</h2><p class="hint">'+(j.sta?'Nenhuma impressora cadastrada. Use "Incluir impressora" para buscar na rede ou informar o IP.':'Conecte o dispositivo a uma rede WiFi para iniciar o monitoramento.')+'</p></div>';return}
 el.innerHTML=j.printers.map(p=>{const cls=!p.online?'err':(p.alert?'warn':'ok');const title=esc(p.name||p.model||p.host||p.ip);
 const st=!p.online?'<span class="badge err">OFFLINE</span>':(p.alert?'<span class="badge warn">ALERTA</span>':'<span class="badge ok">ONLINE</span>');
 const ports=p.ports?[p.ports.raw?'raw '+p.ports.raw:'',p.ports.ipp?'IPP '+p.ports.ipp+(p.ipp_path||''):'',p.ports.lpd?'LPD '+p.ports.lpd+(p.lpd_queue?'/'+p.lpd_queue:''):''].filter(Boolean).join(', '):'';
-let meta=[p.model&&p.model!==p.name?esc(p.model):'',esc(p.ip)+(p.host?' · '+esc(p.host):''),p.location?esc(p.location):'',p.manual?'cadastro manual':'descoberta mDNS',p.pdl&&p.pdl.length?'linguagens: '+esc(p.pdl.join(', ')):'',ports?'portas: '+esc(ports):''].filter(Boolean).join(' · ');
+let meta=[p.model&&p.model!==p.name?esc(p.model):'',esc(p.ip)+(p.host?' · '+esc(p.host):''),p.location?esc(p.location):'',p.mdns?'incluída pela busca mDNS':'incluída por IP',p.pdl&&p.pdl.length?'linguagens: '+esc(p.pdl.join(', ')):'',ports?'portas: '+esc(ports):''].filter(Boolean).join(' · ');
 let body='';if(p.online){body+='<p class="meta">'+esc(p.dev_status_text)+' / '+esc(p.prn_status_text)+(p.pages!=null?' · '+p.pages.toLocaleString('pt-BR')+' páginas':'')+(p.last_ok!=null?' · há '+p.last_ok+' s':'')+'</p>';
 if(p.errors)body+='<p class="errs">⚠ '+esc(p.errors)+'</p>';if(p.supplies.length)body+='<div class="sup">'+p.supplies.map(supHtml).join('')+'</div>'}
 else body+='<p class="meta">Sem resposta SNMP'+(p.last_ok!=null?' (última há '+p.last_ok+' s)':'')+'</p>';
@@ -169,7 +186,22 @@ el.querySelectorAll('[data-rm]').forEach(b=>b.onclick=async()=>{if(confirm('Remo
 el.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>testPage(b.dataset.test));
 }catch(e){}}
 printers();setInterval(printers,10000);
-$('#f-prn').onsubmit=async e=>{e.preventDefault();try{await post('/api/printers',e.target);msg('Impressora adicionada.',true);$('#p-ip').value='';setTimeout(printers,500)}catch(x){msg(x.message,false)}};
+/* ---- modal "Incluir impressora" (busca mDNS sob demanda) ---- */
+let dTimer=null;
+function openDiscover(){$('#dmodal').classList.add('on');$('#d-list').innerHTML='';$('#d-status').textContent='Clique em Buscar ou informe o IP.';renderDiscover()}
+$('#b-prn-add').onclick=openDiscover;
+$('#d-close').onclick=()=>{$('#dmodal').classList.remove('on');if(dTimer){clearInterval(dTimer);dTimer=null}post('/api/discover/clear').catch(()=>{})};
+async function renderDiscover(){try{const r=await fetch('/api/discover');const j=await r.json();
+if(j.running||j.count)$('#d-status').textContent=(j.running?'Buscando… ':'')+j.count+' encontrada'+(j.count===1?'':'s');
+else if(!j.running&&dTimer)$('#d-status').textContent='Nenhuma impressora anunciada via mDNS nesta rede.';
+$('#d-scan').disabled=j.running;
+$('#d-list').innerHTML=j.found.map(f=>{const ports=[f.ports.raw?'9100':'',f.ports.ipp?'IPP':'',f.ports.lpd?'LPD':''].filter(Boolean).join(' · ');
+return '<div class="ditem"><div><b>'+esc(f.name||f.host||f.ip)+'</b><small>'+esc(f.ip)+(f.model&&f.model!==f.name?' · '+esc(f.model):'')+(ports?' · '+ports:'')+'</small></div>'+(f.added?'<span class="badge ok">incluída</span>':'<button data-add="'+esc(f.ip)+'">Adicionar</button>')+'</div>'}).join('');
+$('#d-list').querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>addPrinter(b.dataset.add));
+if(!j.running&&dTimer){clearInterval(dTimer);dTimer=null}}catch(e){}}
+$('#d-scan').onclick=async()=>{try{await post('/api/discover/start');$('#d-status').textContent='Buscando…';$('#d-scan').disabled=true;if(dTimer)clearInterval(dTimer);dTimer=setInterval(renderDiscover,1000)}catch(x){msg(x.message,false)}};
+async function addPrinter(ip){if(!ip)return;try{await post('/api/printers',null,{ip});msg('Impressora '+ip+' incluída. Sondagem SNMP em instantes.',true);printers();renderDiscover()}catch(x){msg(x.message,false)}}
+$('#f-prn').onsubmit=async e=>{e.preventDefault();await addPrinter($('#p-ip').value.trim());$('#p-ip').value=''};
 $('#b-prn-refresh').onclick=async()=>{try{await post('/api/printers/refresh');msg('Descoberta e sondagem reagendadas.',true);setTimeout(printers,4000)}catch(x){msg(x.message,false)}};
 const jobState={idle:'nenhum',streaming:'enviando',finishing:'finalizando',done:'concluído',error:'erro'};
 async function printStatus(){try{const r=await fetch('/api/print/status');const j=await r.json();const d=$('#p-job');

@@ -35,6 +35,7 @@ State state = State::Menu;
 String line;            // linha em digitacao
 String pendingSsid;     // SSID informado, aguardando senha
 String pendingValue;    // valor intermediario (IP da pagina de teste, URL do servidor)
+bool discoverWait = false;   // opcao 'f': imprimir resultados quando a busca mDNS terminar
 bool hideEcho = false;  // ecoa '*' no lugar dos caracteres (senhas)
 char lastEol = 0;       // trata CR+LF como um unico fim de linha
 
@@ -111,10 +112,11 @@ void printMenuImpl() {
     Serial.println(" 6) Reiniciar");
     Serial.println(" 7) Restaurar padroes de fabrica");
     Serial.println(" 8) Listar impressoras");
-    Serial.println(" a) Adicionar impressora por IP");
+    Serial.println(" f) Buscar impressoras na rede (mDNS, ~9 s)");
+    Serial.println(" a) Incluir impressora por IP");
     Serial.println(" d) Remover impressora");
     Serial.println(" c) Community SNMP");
-    Serial.println(" r) Forcar nova descoberta/sondagem");
+    Serial.println(" r) Forcar sondagem SNMP agora");
     Serial.println(" t) Imprimir pagina de teste");
     Serial.println(" s) Servidor externo (URL WebSocket e token)");
     Serial.println(" h) ou 'menu': mostrar este menu");
@@ -199,8 +201,14 @@ void handleMenu(const String& cmd) {
             PrinterMonitor::printList(Serial);
             prompt("menu");
             break;
+        case 'f': case 'F': {
+            String err;
+            if (PrinterMonitor::startDiscovery(&err)) { discoverWait = true; Serial.println("Buscando impressoras na rede (aguarde ~9 s)..."); }
+            else { Serial.printf("Falha: %s.\n", err.c_str()); prompt("menu"); }
+            break;
+        }
         case 'a': case 'A':
-            Serial.println("IP da impressora (vazio = cancelar)");
+            Serial.println("IP da impressora (vazio = cancelar; a opcao 'f' lista os IPs anunciados na rede)");
             state = State::AskAddIp;
             prompt("ip");
             break;
@@ -217,7 +225,7 @@ void handleMenu(const String& cmd) {
             break;
         case 'r': case 'R':
             PrinterMonitor::refreshNow();
-            Serial.println("Descoberta mDNS e sondagem SNMP reagendadas.");
+            Serial.println("Sondagem SNMP de todas as impressoras reagendada.");
             prompt("menu");
             break;
         case 't': case 'T':
@@ -448,6 +456,11 @@ void Console::begin(DeviceConfig& cfg) {
 
 void Console::loop() {
     if (state == State::Scanning) pollScan();
+    if (discoverWait && !PrinterMonitor::isDiscovering()) {
+        discoverWait = false;
+        PrinterMonitor::printFound(Serial);
+        prompt("menu");
+    }
     while (Serial.available() > 0) processChar((char)Serial.read());
 }
 
