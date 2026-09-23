@@ -41,6 +41,14 @@ String ackJobId;
 uint32_t ackSeq = 0;
 uint32_t ackDeferredAt = 0;
 volatile bool reconfigPending = false;   // reconfigure() so marca; loop() aplica (o cliente WS nao e thread-safe)
+// "id" do comando em processamento (campo opcional que o servidor manda em cada comando). Toda resposta
+// enviada dentro de handleMessage() ecoa esse id: e por ele que o servidor casa resposta com comando.
+// Mensagens espontaneas (status periodico, discover.results ao fim da busca, job.done) saem sem id.
+String reqId;
+// get_discovery recebido com a busca mDNS em andamento: a resposta e adiada ate a busca terminar
+// (ate ~9 s), para o servidor receber a lista completa mesmo pedindo cedo. Guarda o id do comando.
+bool discoveryReplyPending = false;
+String discoveryReplyId;
 
 bool isCloudSource(const String& s) { return s == "cloud" || s == "cloud-test"; }
 
@@ -64,6 +72,7 @@ bool parseUrl(const String& url, bool& ssl, String& host, uint16_t& port, String
 
 void send(JsonDocument& doc) {
     if (!connected) return;
+    if (reqId.length()) doc["id"] = reqId;
     doc["ts"] = millis();
     String out;
     serializeJson(doc, out);
@@ -109,9 +118,12 @@ void sendHello() {
     lastJobReported = true;   // o hello ja levou a informacao
 }
 
-void sendStatus() {
+// replyTo: tipo do comando que pediu a mensagem (get_status, get_printers...). O servidor casa a
+// resposta com o comando por esse campo; sem ele, o comando expira mesmo com a mensagem entregue.
+void sendStatus(const char* replyTo = nullptr) {
     JsonDocument d;
     d["type"] = "status";
+    if (replyTo) d["reply_to"] = replyTo;
     d["uptime"] = millis() / 1000;
     d["heap"] = ESP.getFreeHeap();
     d["rssi"] = WiFi.RSSI();
@@ -126,30 +138,40 @@ void sendStatus() {
     lastStatusSent = millis();
 }
 
-void sendPrinters() {
+// Campos de correlacao para as mensagens montadas como texto (printers, discover.results, job.status).
+String replyToField(const char* replyTo) {
+    String f;
+    if (replyTo) f += String(",\"reply_to\":\"") + replyTo + "\"";
+    if (reqId.length()) f += ",\"id\":\"" + reqId + "\"";
+    return f;
+}
+
+void sendPrinters(const char* replyTo = nullptr) {
     // Reaproveita o JSON do monitor como objeto "data" (mesmo formato de GET /api/printers).
     String data;
     data.reserve(2048);
     PrinterMonitor::toJson(data);
-    String out = "{\"type\":\"printers\",\"ts\":" + String(millis()) + ",\"data\":" + data + "}";
+    String out = "{\"type\":\"printers\",\"ts\":" + String(millis()) + replyToField(replyTo) + ",\"data\":" + data + "}";
     ws.sendTXT(out);
     lastPrintersSent = millis();
 }
 
 bool discoverPending = false;
 
-void sendDiscovery() {
+void sendDiscovery(const char* replyTo = nullptr) {
     String data;
     data.reserve(1024);
     PrinterMonitor::discoveryJson(data);
-    String out = "{\"type\":\"discover.results\",\"ts\":" + String(millis()) + ",\"data\":" + data + "}";
-    ws.sendTXT(out);
+    String out = "{\"type\":\"discover.results\",\"ts\":" + String(millis()) + replyToField(replyTo) + ",\"data\":" + data + "}";
+    bool ok = ws.sendTXT(out);
+    Serial.printf("[WS] discover.results %s: %u bytes%s%s%s\n", ok ? "enviado" : "NAO enviado", (unsigned)out.length(),
+                  replyTo ? " em resposta a " : "", replyTo ? replyTo : "", reqId.length() ? (" id=" + reqId).c_str() : "");
 }
 
-void sendJobStatus(const char* type) {
+void sendJobStatus(const char* type, const char* replyTo = nullptr) {
     String s;
     PrintJob::statusJson(s);
-    String out = String("{\"type\":\"") + type + "\",\"ts\":" + String(millis()) + ",\"data\":" + s + "}";
+    String out = String("{\"type\":\"") + type + "\",\"ts\":" + String(millis()) + replyToField(replyTo) + ",\"data\":" + s + "}";
     ws.sendTXT(out);
 }
 
@@ -212,12 +234,21 @@ bool parseIp(JsonVariantConst v, IPAddress& ip) {
     return s && ip.fromString(s);
 }
 
+// IP da impressora em um comando: o contrato usa "printer"; "ip" e aceito como sinonimo
+// porque e o nome natural do lado do servidor e ja chegou assim em producao.
+JsonVariantConst printerField(JsonDocument& doc) {
+    return doc["printer"].isNull() ? doc["ip"].as<JsonVariantConst>() : doc["printer"].as<JsonVariantConst>();
+}
+
 void handleMessage(const uint8_t* payload, size_t len) {
     JsonDocument doc;
     DeserializationError e = deserializeJson(doc, payload, len);
     if (e) { sendError("bad_json", e.c_str()); return; }
     const char* type = doc["type"] | "";
     const char* jobId = doc["job_id"] | (const char*)nullptr;
+    // id do comando: vale para todas as respostas ate sair desta funcao (qualquer return)
+    reqId = String(doc["id"] | "");
+    struct ClearReqId { ~ClearReqId() { reqId = ""; } } clearReqId;
 
     if (!strcmp(type, "welcome")) {
         uint32_t hb = doc["status_interval"] | 0;
@@ -232,9 +263,9 @@ void handleMessage(const uint8_t* payload, size_t len) {
         return;
     }
     if (!strcmp(type, "ping"))         { JsonDocument d; d["type"] = "pong"; send(d); return; }
-    if (!strcmp(type, "get_status"))   { sendStatus(); return; }
-    if (!strcmp(type, "get_printers")) { sendPrinters(); return; }
-    if (!strcmp(type, "get_job"))      { sendJobStatus("job.status"); return; }
+    if (!strcmp(type, "get_status"))   { sendStatus("get_status"); return; }
+    if (!strcmp(type, "get_printers")) { sendPrinters("get_printers"); return; }
+    if (!strcmp(type, "get_job"))      { sendJobStatus("job.status", "get_job"); return; }
     if (!strcmp(type, "refresh"))      { PrinterMonitor::refreshNow(); JsonDocument d; d["type"] = "ack"; d["reply_to"] = "refresh"; send(d); return; }
     if (!strcmp(type, "discover")) {
         String err;
@@ -245,18 +276,22 @@ void handleMessage(const uint8_t* payload, size_t len) {
         send(d);
         return;
     }
-    if (!strcmp(type, "get_discovery")) { sendDiscovery(); return; }
+    if (!strcmp(type, "get_discovery")) {
+        if (PrinterMonitor::isDiscovering()) { discoveryReplyPending = true; discoveryReplyId = reqId; return; }   // responde em loop()
+        sendDiscovery("get_discovery");
+        return;
+    }
 
     if (!strcmp(type, "printer.add")) {
         String err;
-        bool ok = PrinterMonitor::addManual(String(doc["printer"] | ""), &err);
+        bool ok = PrinterMonitor::addManual(String(printerField(doc) | ""), &err);
         JsonDocument d; d["type"] = ok ? "ack" : "error"; d["reply_to"] = "printer.add";
         if (!ok) d["code"] = err;
         send(d);
         return;
     }
     if (!strcmp(type, "printer.remove")) {
-        bool ok = PrinterMonitor::remove(String(doc["printer"] | ""));
+        bool ok = PrinterMonitor::remove(String(printerField(doc) | ""));
         JsonDocument d; d["type"] = ok ? "ack" : "error"; d["reply_to"] = "printer.remove";
         if (!ok) d["code"] = "not_found";
         send(d);
@@ -278,7 +313,7 @@ void handleMessage(const uint8_t* payload, size_t len) {
 
     if (!strcmp(type, "print_test")) {
         IPAddress ip;
-        if (!parseIp(doc["printer"], ip)) { sendError("bad_printer", "IP invalido", jobId, "print_test"); return; }
+        if (!parseIp(printerField(doc), ip)) { sendError("bad_printer", "IP invalido", jobId, "print_test"); return; }
         String id = jobId ? String(jobId) : "test-" + String(millis());
         PrintJob::Target t;
         targetFromMessage(doc, ip, t);
@@ -296,7 +331,7 @@ void handleMessage(const uint8_t* payload, size_t len) {
     if (!strcmp(type, "job.start")) {
         if (!jobId) { sendError("missing_job_id", "job_id obrigatorio"); return; }
         IPAddress ip;
-        if (!parseIp(doc["printer"], ip)) { sendError("bad_printer", "IP invalido", jobId); return; }
+        if (!parseIp(printerField(doc), ip)) { sendError("bad_printer", "IP invalido", jobId); return; }
         PrintJob::Target t;
         targetFromMessage(doc, ip, t);
         String err;
@@ -364,7 +399,7 @@ void onEvent(WStype_t type, uint8_t* payload, size_t length) {
                 else if (refused) reason += " (servidor respondeu HTTP em vez de aceitar o WebSocket)";
                 else if (reason == "TCP connection cleanup") reason = "tentativa anterior de conexao TCP/TLS falhou (DNS, TCP ou TLS; heap livre " + String(ESP.getFreeHeap()) + " B); nova tentativa em 10 s";
                 else if (reason == "Connection lost") reason = "conexao perdida (servidor ou rede fechou o TCP)";
-                else if (reason == "Header response timeout") reason = "servidor nao respondeu ao handshake WebSocket em 5 s";
+                else if (reason == "Header response timeout") reason = "servidor nao respondeu ao handshake WebSocket em " + String(WEBSOCKETS_TCP_TIMEOUT / 1000) + " s (cold start ou deploy do backend?)";
                 lastErr = reason;
                 Serial.printf(refused ? "[WS] handshake recusado: %s\n" : "[WS] queda de conexao: %s\n", reason.c_str());
             } else if (connected) {
@@ -374,6 +409,7 @@ void onEvent(WStype_t type, uint8_t* payload, size_t length) {
             attempts++;
             connected = false;
             ackPending = false;
+            discoveryReplyPending = false;
             // Sem link nao ha mais blocos: aborta ja, em vez de esperar data_timeout. O resultado
             // (link_lost) vai no last_job do proximo hello.
             if (PrintJob::busy() && isCloudSource(PrintJob::info().source)) PrintJob::cancel("link_lost");
@@ -501,7 +537,14 @@ void loop() {
     uint32_t now = millis();
     if (now - lastStatusSent > statusIntervalMs) sendStatus();
     if (now - lastPrintersSent > printersIntervalMs) sendPrinters();
-    if (discoverPending && !PrinterMonitor::isDiscovering()) { discoverPending = false; sendDiscovery(); }
+    if ((discoverPending || discoveryReplyPending) && !PrinterMonitor::isDiscovering()) {
+        // Uma unica mensagem atende ao discover.results espontaneo e ao get_discovery adiado (com id).
+        reqId = discoveryReplyPending ? discoveryReplyId : String();
+        sendDiscovery(discoveryReplyPending ? "get_discovery" : nullptr);
+        reqId = "";
+        discoverPending = false;
+        discoveryReplyPending = false;
+    }
 }
 
 bool isConfigured() { return g_cfg && g_cfg->hasCloud(); }

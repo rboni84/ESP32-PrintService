@@ -8,7 +8,7 @@ Protocolo **1**. Documento válido para o firmware **0.3.5**.
 | 0.3.1 | `pdl` por impressora, `last_job` no `hello`, `data_timeout` no `welcome`, código `link_lost` |
 | 0.3.2 | Transporte `ipp`, campos `ports` e `ipp_path`, formato `pdf` na página de teste, `detail` nos erros |
 | 0.3.3 | Transporte `lpd`, campos `lpd_queue`, ordem automática pelas portas anunciadas, `POST /api/print/test` assíncrono |
-| 0.3.5 | `job.ack` retido até o buffer ter espaço para outro bloco (contrapressão real; evita `overflow` com impressora lenta mesmo com o servidor aguardando cada ack); `device.restart` pelo WebSocket; capability `restart` no `hello` |
+| 0.3.5 | `job.ack` retido até o buffer ter espaço para outro bloco (contrapressão real; evita `overflow` com impressora lenta mesmo com o servidor aguardando cada ack); `device.restart` pelo WebSocket; capability `restart` no `hello`; `reply_to` nas respostas a `get_status`, `get_printers`, `get_job` e `get_discovery`; `ip` aceito como sinônimo de `printer` nos comandos; eco do `id` do comando em toda resposta direta; `get_discovery` durante a busca aguarda o término para responder |
 | 0.3.4 | Busca mDNS só sob demanda (`discover`, `discover.results`, `GET /api/discover`); nada entra na lista monitorada sem inclusão explícita; `refresh` passa a só resondar SNMP |
 
 O PrintService é um dispositivo ESP32-C6 instalado na rede local das impressoras. Ele:
@@ -188,14 +188,14 @@ Descritas na seção 2.5.
 |---|---|---|
 | `welcome` | opcionais `status_interval` (s, 5–600), `printers_interval` (s, 10–3600), `data_timeout` (s, 10–120) | Ajusta intervalos e o tempo de espera por blocos. O dispositivo responde com `status` e `printers`. Envie logo após o `hello`. |
 | `ping` | — | Responde `pong`. |
-| `get_status` | — | Responde `status`. |
-| `get_printers` | — | Responde `printers`. |
-| `get_job` | — | Responde `job.status` com `data` igual ao objeto de `GET /api/print/status`. |
+| `get_status` | — | Responde `status` com `reply_to: "get_status"`. |
+| `get_printers` | — | Responde `printers` com `reply_to: "get_printers"`. |
+| `get_job` | — | Responde `job.status` com `reply_to: "get_job"` e `data` igual ao objeto de `GET /api/print/status`. |
 | `refresh` | — | Força sondagem SNMP imediata de todas as impressoras cadastradas. Responde `ack`. |
 | `discover` | — | Inicia a busca mDNS (cerca de 9 s). Responde `ack` e, ao terminar, envia `discover.results`. `error` com `code` `sem rede WiFi`, `busca em andamento` ou `mDNS indisponivel`. |
-| `get_discovery` | — | Responde `discover.results` com a lista atual (pode estar vazia ou em andamento). |
-| `printer.add` | `printer` (IP) | Inclui a impressora na lista monitorada e persiste. Se o IP estiver na última busca, aproveita nome e portas anunciadas. Responde `ack`, ou `error` com `code` `IP invalido`, `ja cadastrada` ou `limite de impressoras atingido`. |
-| `printer.remove` | `printer` (IP) | Remove. Responde `ack` ou `error` (`not_found`). |
+| `get_discovery` | — | Responde `discover.results` com `reply_to: "get_discovery"`. **Se a busca estiver em andamento, a resposta é adiada até ela terminar** (a busca dura cerca de 9 s: 3 s por serviço mDNS), então o servidor pode enviar `discover` e logo em seguida `get_discovery`, desde que aguarde a resposta por pelo menos 12 s. Sem busca em andamento, responde na hora com a última lista. O `discover.results` espontâneo, ao fim de uma busca, não leva `reply_to`. |
+| `printer.add` | `printer` (IP; `ip` é aceito como sinônimo) | Inclui a impressora na lista monitorada e persiste. Se o IP estiver na última busca, aproveita nome e portas anunciadas. Responde `ack`, ou `error` com `code` `IP invalido`, `ja cadastrada` ou `limite de impressoras atingido`. |
+| `printer.remove` | `printer` (IP; `ip` é aceito como sinônimo) | Remove. Responde `ack` ou `error` (`not_found`). |
 | `device.restart` | opcional `force` | Reinicia o dispositivo em 1,5 s. Responde `ack` (com `delay_ms`) e o WebSocket cai; o `hello` seguinte marca a volta. Com trabalho em curso responde `error` (`busy`), salvo `force: true`, que cancela o trabalho (`job.error` com `code` `restart`) antes de reiniciar. Não há reset de fábrica remoto. |
 | `print_test` | `printer`; opcionais `transport`, `port`, `ipp_path`, `lpd_queue`, `format` (`auto`, `pdf`, `pcl`, `text`, `ps`), `job_id` | Imprime a página de teste (seção 2.6). Responde `job.ready` com `test: true`, depois `job.done` ou `job.error`. |
 | `job.start` | `job_id`, `printer`; opcionais `transport`, `port`, `ipp_path`, `lpd_queue`, `format` (MIME, para IPP), `size` (obrigatório para LPD), `name` | Conecta à impressora. Responde `job.ready` ou `job.error`. |
@@ -245,6 +245,8 @@ servidor                                    dispositivo                         
 ```
 
 Os cabeçalhos de protocolo (HTTP+IPP ou handshake LPD) são enviados no primeiro bloco, não no `job.start`.
+
+**Correlação por `id`.** Todo comando pode levar um campo `id` (texto livre, por exemplo um UUID). O dispositivo ecoa esse `id` em **toda** mensagem enviada em resposta direta ao comando: `ack`, `error`, `status`, `printers`, `job.status`, `discover.results`, `job.ready`, `job.ack`, `job.error`. Mensagens espontâneas (`status` periódico, `printers` periódico, `discover.results` ao fim da busca, `job.done`/`job.error` ao encerrar o trabalho) não levam `id`. Use `id` para casar resposta e comando; `reply_to` continua presente como informação do tipo.
 
 Regras de controle de fluxo:
 
