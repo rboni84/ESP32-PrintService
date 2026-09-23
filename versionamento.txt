@@ -1,0 +1,147 @@
+PrintService (ESP32-C6) - registro de versoes, edicoes e testes
+================================================================
+
+Regra: toda edicao de codigo, contrato ou configuracao e todo teste executado
+entram aqui, na versao correspondente, com data. Versao do firmware em
+platformio.ini (FW_VERSION). Formato: [data] tipo: descricao. Tipos:
+EDICAO (codigo/config), DOC (documentacao/contrato), TESTE (resultado
+observado), PENDENTE (item aberto).
+
+----------------------------------------------------------------
+0.3.5  (2026-09-23)  - em teste, nao commitado
+----------------------------------------------------------------
+[2026-09-23] EDICAO src/cloud.cpp: job.ack retido ate o buffer ter espaco para
+    outro bloco inteiro (buffer_free >= chunk_max). Causa do erro "overflow"
+    de 09:23 em impressao pela cloud: o ESP confirmava o bloco assim que
+    copiava para o buffer de 32 KB, sem olhar o espaco restante; com a
+    impressora lenta, 4 blocos de 8 KB lotavam o buffer e o 5o era recusado
+    mesmo com o servidor aguardando cada ack. Ack pendente e descartado se o
+    trabalho termina ou o link cai; bloco recebido com ack pendente libera o
+    ack anterior. Log "[WS] job.ack seq=N adiado X ms" quando espera > 2 s.
+[2026-09-23] EDICAO src/cloud.cpp: comando device.restart pelo WebSocket.
+    Responde ack (delay_ms 1500) e reinicia via Portal::scheduleRestart().
+    Com trabalho em curso responde error "busy", salvo force:true, que
+    cancela o trabalho (job.error code "restart") antes. Sem reset de
+    fabrica remoto. Capability "restart" no hello.
+[2026-09-23] EDICAO src/cloud.cpp: log de desconexao reclassificado. So e
+    "handshake recusado" quando o servidor respondeu HTTP. Textos da
+    biblioteca WebSockets traduzidos: "TCP connection cleanup" = tentativa
+    anterior de connect() TCP/TLS falhou em silencio (mostra heap livre);
+    "Connection lost" = conexao perdida; "Header response timeout" =
+    servidor nao respondeu ao upgrade WebSocket no prazo.
+[2026-09-23] EDICAO src/cloud.cpp: reply_to nas respostas a get_status,
+    get_printers, get_job e get_discovery.
+[2026-09-23] EDICAO src/cloud.cpp: campo "ip" aceito como sinonimo de
+    "printer" em printer.add, printer.remove, print_test e job.start (o
+    servidor envia "ip"; o ESP lia so "printer" e devolvia not_found).
+[2026-09-23] EDICAO src/cloud.cpp: eco do campo "id" do comando em toda
+    resposta direta (ack, error, status, printers, job.status,
+    discover.results, job.ready, job.ack, job.error). O servidor casa
+    resposta com comando por esse campo; sem ele o comando expirava mesmo
+    com a resposta entregue. Mensagens espontaneas saem sem id.
+[2026-09-23] EDICAO src/cloud.cpp: get_discovery recebido com a busca mDNS em
+    andamento tem a resposta adiada ate o fim da busca (~9 s), enviada com o
+    id do comando. O servidor pedia a lista 5-8 s apos o discover e recebia
+    running:true com lista parcial/vazia.
+[2026-09-23] EDICAO src/cloud.cpp: log "[WS] discover.results enviado: N bytes
+    em resposta a get_discovery id=..." para correlacionar com o servidor.
+[2026-09-23] EDICAO platformio.ini: -DWEBSOCKETS_TCP_TIMEOUT=20000 (padrao da
+    lib 5 s). Em cold start/deploy do Cloud Run o TLS responde na hora mas o
+    upgrade HTTP so vem quando o container sobe; a 1a reconexao falhava.
+    FW_VERSION 0.3.4 -> 0.3.5.
+[2026-09-23] DOC docs/api-contract.md: regra 1 de controle de fluxo (ack
+    retido), device.restart, reply_to, sinonimo ip, correlacao por id,
+    get_discovery adiado, codigo de erro "restart", changelog 0.3.5.
+    src/web_docs.h: device.restart na lista de mensagens.
+
+Testes com simulador no PC (scratchpad wssim.ps1, conectado ao backend de
+producao como PrintService-91FE):
+[2026-09-23] TESTE 10:34-10:38: discover respondido ok; get_discovery
+    expirava com reply_to e passou a "ok" ao ecoar o id do comando.
+    Conclusao: servidor casa por "id".
+[2026-09-23] TESTE 10:40-10:45: printer.remove/add com campo "ip" (ack em
+    2-27 ms), refresh, print_test (job.ready + job.done). Servidor manda
+    "name" amigavel no printer.add (ESP nao armazena). Servidor fechou o
+    WebSocket 80 ms apos job.done de um job_id gerado pelo dispositivo
+    (test-...), provavel excecao no backend.
+[2026-09-23] TESTE 10:25-10:32: sessao WebSocket do PC ficou 7 min aberta sem
+    o servidor fechar; request timeout do Cloud Run nao e causa de quedas.
+
+Testes com o dispositivo real (COM11, ESP em 192.168.9.99, SSID DISPAFILM IOT):
+[2026-09-23] TESTE 10:49: gravacao OK, conexao ao servidor em 8 s apos a
+    sondagem, welcome recebido (data_timeout 30 do servidor).
+[2026-09-23] TESTE 11:05: queda "conexao perdida" (servidor fechou o TCP);
+    1a reconexao perdida por "sem resposta ao upgrade em 5 s"; 2a conectou
+    26 s apos a queda. Motivou o WEBSOCKETS_TCP_TIMEOUT=20000.
+[2026-09-23] TESTE 11:13: busca mDNS pelo console serial: 24 impressoras em
+    192.168.1/10/15 (rede tem repetidor mDNS). GET /api/discover retornou
+    JSON valido de 4800 bytes. Copia da mensagem WS em
+    discover_results_ws.json (scratchpad da sessao).
+[2026-09-23] TESTE 11:17, 11:25, 11:40, 11:51, 11:52, 11:53: busca pelo
+    servidor, 23-30 dispositivos, discover.results de 4.7-6.5 KB enviado em
+    resposta ao get_discovery com id. Interface do servidor seguia vazia.
+[2026-09-23] TESTE 11:23: impressao pela cloud para 192.168.1.100:9100 raw,
+    184861 bytes em 3260 ms, sem overflow, sem ack adiado > 2 s. Sem queda
+    apos o job.done.
+[2026-09-23] TESTE 11:26: device.restart pelo servidor: ack, reset SW_CPU em
+    1,7 s, online de novo em 13 s.
+[2026-09-23] TESTE 11:28: queda "conexao perdida" sem comando/trabalho;
+    reconectou na 1a tentativa 20 s depois (efeito do timeout de 20 s).
+[2026-09-23] TESTE 11:51-11:53: printer.remove e printer.add de 192.168.1.100
+    pelo servidor com campo "ip": executados e persistidos; SNMP trouxe a
+    impressora online em 1 s (HP LaserJet E50145).
+
+[2026-09-23] PENDENTE backend: lista da busca vazia na interface apesar do
+    discover.results valido chegar com id (conferir data.found, null em
+    ports, tamanho 5-6 KB).
+[2026-09-23] PENDENTE backend: quedas de TCP pelo servidor (11:05, 11:28) sem
+    causa no ESP; suspeita Cloud Run min-instances 0 ou deploys.
+[2026-09-23] PENDENTE decisao: nome amigavel enviado no printer.add ("name")
+    fica so no servidor ou o ESP passa a armazenar/devolver.
+[2026-09-23] PENDENTE: commit das alteracoes 0.3.5.
+
+----------------------------------------------------------------
+0.3.4  (2026-09-22)
+----------------------------------------------------------------
+EDICAO: busca mDNS so sob demanda (discover, discover.results,
+    GET /api/discover); nada entra na lista monitorada sem inclusao
+    explicita (printer.add / modal "Incluir impressora"); refresh passa a
+    so resondar SNMP. Lista de encontrados leve, ate 32, liberada 5 min apos
+    a busca.
+TESTE: portal, monitor SNMP e mDNS funcionando na placa; Epson L6270
+    encontrada em 192.168.1.120. ESP na VLAN 192.168.9.x com TCP bloqueado
+    para 192.168.1.x na epoca (ping/SNMP passavam), impressao de teste "sem
+    resposta".
+
+----------------------------------------------------------------
+0.3.3  (2026-09-22)
+----------------------------------------------------------------
+EDICAO: transporte LPD (RFC 1179, porta 515), campo lpd_queue, ordem
+    automatica pelas portas anunciadas (raw, ipp, lpd), POST /api/print/test
+    assincrono. Seletor de transporte no portal com campo de fila.
+
+----------------------------------------------------------------
+0.3.2  (2026-09-22)
+----------------------------------------------------------------
+EDICAO: transporte IPP (porta 631), campos ports e ipp_path, formato pdf na
+    pagina de teste, detail nos erros. Inicio adiado da pagina de teste
+    (corrige WDT do async_tcp). Ordem das rotas REST (especificas antes de
+    /api/printers). Offline so apos 3 sondagens falhas.
+
+----------------------------------------------------------------
+0.3.1  (2026-09-22)
+----------------------------------------------------------------
+EDICAO: pdl por impressora (TXT mDNS + prtInterpreterLangFamily), last_job
+    no hello, data_timeout no welcome (10-120 s), cancelamento imediato com
+    link_lost ao cair o WebSocket durante trabalho.
+
+----------------------------------------------------------------
+0.3.0  (2026-09-22)
+----------------------------------------------------------------
+EDICAO: fase 3 - cliente WebSocket para o servidor externo
+    (links2004/WebSockets + ArduinoJson), hello/status/printers, trabalhos
+    em blocos base64 com job.ack, motor raw 9100, pagina de teste, REST
+    local. Fases 1 e 2 anteriores: portal cativo, menu serial, cliente SNMP
+    proprio, monitor de impressoras, LED de status WS2812 (GPIO8), reset de
+    fabrica pelo botao BOOT (GPIO9).
+TESTE: compilacao limpa (flash ~45 %, RAM estatica ~114 KB).
